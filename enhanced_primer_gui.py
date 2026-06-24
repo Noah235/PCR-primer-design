@@ -13,7 +13,7 @@ import primer_design as pd
 
 
 def _run_genome_gff(params, output_csv, genome_path, gff_path, target_names,
-                    flank_size, do_specificity, log):
+                    flank_size, do_specificity, log, placement="internal"):
     """Genome FASTA + GFF3 pipeline. ``log`` is a callable(str)."""
     genome = pd.load_genome(genome_path)
     log("Genome loaded")
@@ -41,26 +41,26 @@ def _run_genome_gff(params, output_csv, genome_path, gff_path, target_names,
     with open(output_csv, "w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow([pd.params_summary(
-            params, f"flank={flank_size}, genes={len(gene_list)}")])
+            params, f"flank={flank_size}, placement={placement}, genes={len(gene_list)}")])
         writer.writerow(pd.RESULT_COLUMNS)
         for i, gene in enumerate(gene_list):
             if i % 10 == 0:
                 log(f"Processing gene {i + 1}/{len(gene_list)}...")
-            name = gene["gene_name"] or gene["locus_tag"]
-            template = pd.get_gene_sequence(genome, gene)
-            r = pd.design_primers_for_sequence(name, template, params)
-            if do_specificity and r["status"] == "OK":
-                spec = pd.in_silico_pcr(
-                    r["forward"], r["reverse"], prepared_genome,
-                    min_product=params.product_min, max_product=params.product_max)
-                r["specificity"] = pd.specificity_label(spec)
-            else:
-                r["specificity"] = "Not tested"
-            if r["status"] == "OK":
-                n_ok += 1
-            writer.writerow(pd.result_to_row(r))
+            for r in pd.design_for_gene(genome, gene, params, flank_size, mode=placement):
+                if do_specificity and r["status"] == "OK":
+                    # Window generous enough to include this pair's own amplicon.
+                    max_prod = max(params.product_max, (r["product_size"] or 0) + 500)
+                    spec = pd.in_silico_pcr(
+                        r["forward"], r["reverse"], prepared_genome,
+                        min_product=50, max_product=max_prod)
+                    r["specificity"] = pd.specificity_label(spec)
+                else:
+                    r["specificity"] = "Not tested"
+                if r["status"] == "OK":
+                    n_ok += 1
+                writer.writerow(pd.result_to_row(r))
 
-    log(f"Done. {n_ok}/{len(gene_list)} genes had suitable primers")
+    log(f"Done. {n_ok} primer pair(s) designed across {len(gene_list)} genes")
     log(f"Output: {os.path.abspath(output_csv)}")
     log(f"Sequences: {os.path.abspath(extracted_fasta)}")
     return n_ok, len(gene_list)
@@ -199,6 +199,21 @@ def main():  # pragma: no cover - interactive GUI
     tk.Checkbutton(param_frame, text="Test primer specificity",
                    variable=check_specificity).grid(row=4, column=0, columnspan=2, sticky="w")
 
+    # Primer placement relative to the gene (genome+GFF mode only).
+    placement_label = tk.Label(param_frame, text="Primer placement")
+    placement_label.grid(row=4, column=2, sticky="e")
+    placement_choices = {
+        "Internal (both inside gene)": "internal",
+        "Flanking (fwd upstream / rev downstream)": "flanking",
+        "Fwd upstream / rev internal": ("upstream", "internal"),
+        "Fwd internal / rev downstream": ("internal", "downstream"),
+        "All permutations": "all",
+    }
+    placement_var = tk.StringVar(value="Internal (both inside gene)")
+    placement_combo = ttk.Combobox(param_frame, textvariable=placement_var, state="readonly",
+                                   values=list(placement_choices), width=36)
+    placement_combo.grid(row=4, column=3, columnspan=3, sticky="w")
+
     # ----- Results -----
     results_frame = ttk.LabelFrame(root, text="Results", padding="10")
     results_frame.grid(row=5, column=0, columnspan=6, sticky="ew", padx=10, pady=5)
@@ -213,7 +228,7 @@ def main():  # pragma: no cover - interactive GUI
     def toggle_mode():
         genome_gff = mode_var.get() == "genome_gff"
         for w in (genome_label, genome_entry, genome_browse, gff_label, gff_entry,
-                  gff_browse, flank_label, flank_e):
+                  gff_browse, flank_label, flank_e, placement_label, placement_combo):
             (w.grid if genome_gff else w.grid_remove)()
         for w in (cds_label, cds_entry, cds_browse):
             (w.grid_remove if genome_gff else w.grid)()
@@ -257,7 +272,8 @@ def main():  # pragma: no cover - interactive GUI
                     messagebox.showerror("Error", "Select genome FASTA and GFF3 files.")
                     return
                 _run_genome_gff(params, output_csv, genome_entry.get(), gff_entry.get(),
-                                target_names, int(flank_e.get()), check_specificity.get(), log)
+                                target_names, int(flank_e.get()), check_specificity.get(), log,
+                                placement=placement_choices[placement_var.get()])
             else:
                 if not cds_entry.get():
                     messagebox.showerror("Error", "Select a CDS FASTA file.")

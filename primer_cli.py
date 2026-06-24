@@ -64,8 +64,21 @@ def _write(output_csv, banner, rows):
             w.writerow(row)
 
 
+def _resolve_placement(a):
+    """Turn CLI --placement / --fwd-region / --rev-region into a placement mode."""
+    if a.placement == "custom":
+        if not a.fwd_region or not a.rev_region:
+            sys.exit("--placement custom requires --fwd-region and --rev-region "
+                     f"(choose from {', '.join(pd.PLACEMENT_REGIONS)}).")
+        if a.fwd_region not in pd.PLACEMENT_REGIONS or a.rev_region not in pd.PLACEMENT_REGIONS:
+            sys.exit(f"regions must be one of: {', '.join(pd.PLACEMENT_REGIONS)}")
+        return (a.fwd_region, a.rev_region)
+    return a.placement
+
+
 def run_genome(a):
     params = _params_from_args(a)
+    placement = _resolve_placement(a)
     genome = pd.load_genome(a.genome)
     all_genes = pd.parse_gff3_full(a.gff)
     gene_list, _found, not_found = pd.filter_genes_by_names(all_genes, a.genes or "")
@@ -73,25 +86,27 @@ def run_genome(a):
         logging.warning("Genes not found: %s", ", ".join(not_found))
     if not gene_list:
         sys.exit("No genes to process.")
-    logging.info("Designing primers for %d gene(s)...", len(gene_list))
+    logging.info("Designing primers for %d gene(s), placement=%s ...",
+                 len(gene_list), placement)
 
     prepared_genome = pd.prepare_genome(genome) if a.specificity else None
     rows, n_ok = [], 0
     for gene in gene_list:
-        name = gene["gene_name"] or gene["locus_tag"]
-        template = pd.get_gene_sequence(genome, gene)
-        r = pd.design_primers_for_sequence(name, template, params)
-        if a.specificity and r["status"] == "OK":
-            spec = pd.in_silico_pcr(r["forward"], r["reverse"], prepared_genome,
-                                    params.product_min, params.product_max)
-            r["specificity"] = pd.specificity_label(spec)
-        else:
-            r["specificity"] = "Not tested"
-        n_ok += r["status"] == "OK"
-        rows.append(pd.result_to_row(r))
+        for r in pd.design_for_gene(genome, gene, params, a.flank, mode=placement):
+            if a.specificity and r["status"] == "OK":
+                max_prod = max(params.product_max, (r["product_size"] or 0) + 500)
+                spec = pd.in_silico_pcr(r["forward"], r["reverse"], prepared_genome,
+                                        50, max_prod)
+                r["specificity"] = pd.specificity_label(spec)
+            else:
+                r["specificity"] = "Not tested"
+            n_ok += r["status"] == "OK"
+            rows.append(pd.result_to_row(r))
 
-    _write(a.output, pd.params_summary(params, f"genes={len(gene_list)}"), rows)
-    logging.info("%d/%d genes had suitable primers -> %s", n_ok, len(gene_list), a.output)
+    _write(a.output, pd.params_summary(
+        params, f"placement={placement}, flank={a.flank}, genes={len(gene_list)}"), rows)
+    logging.info("%d primer pair(s) designed across %d genes -> %s",
+                 n_ok, len(gene_list), a.output)
 
 
 def run_cds(a):
@@ -130,6 +145,16 @@ def build_parser():
     g.add_argument("--gff", required=True)
     g.add_argument("--genes", default="", help="comma/line-separated names; empty = all")
     g.add_argument("--specificity", action="store_true", help="run in-silico PCR check")
+    g.add_argument("--flank", type=int, default=200,
+                   help="flank size (bp) extracted up/downstream of each gene")
+    g.add_argument("--placement", default="internal",
+                   choices=["internal", "flanking", "all", "custom"],
+                   help="where to place primers relative to the gene "
+                        "(custom: use --fwd-region/--rev-region)")
+    g.add_argument("--fwd-region", choices=list(pd.PLACEMENT_REGIONS),
+                   help="forward-primer region for --placement custom")
+    g.add_argument("--rev-region", choices=list(pd.PLACEMENT_REGIONS),
+                   help="reverse-primer region for --placement custom")
     g.add_argument("-o", "--output", default="primers.csv")
     _add_param_args(g)
     g.set_defaults(func=run_genome)

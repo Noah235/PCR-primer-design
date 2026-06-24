@@ -120,6 +120,23 @@ def bench_design(templates):
     return t["elapsed"], ok, len(templates)
 
 
+def bench_placement(genome_seq, genome, n_genes, gene_len=1000, flank=200):
+    """Design every placement permutation (6 per gene) over n_genes."""
+    rng = random.Random(7)
+    params = pd.PrimerParams(product_min=80, product_max=5000)
+    genes = []
+    for _ in range(n_genes):
+        start = rng.randint(flank, len(genome_seq) - gene_len - flank - 1)
+        genes.append({"chrom": "chr1", "gene_name": None, "locus_tag": "L",
+                      "start": start, "end": start + gene_len, "strand": 1})
+    pairs = 0
+    with timer() as t:
+        for g in genes:
+            results = pd.design_for_gene(genome, g, params, flank, mode="all")
+            pairs += sum(r["status"] == "OK" for r in results)
+    return t["elapsed"], pairs, n_genes
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -142,13 +159,16 @@ def main():
     templates = make_templates(genome_seq, args.genes, args.template_bp)
     design_t, ok, n_t = bench_design(templates)
 
+    print(f"Placement benchmark: all permutations over {args.genes} genes ...")
+    place_t, place_pairs, place_genes = bench_placement(genome_seq, genome, args.genes)
+
     speedup = legacy_t / fixed_t if fixed_t else float("inf")
 
     lines = [
         "# Benchmark Results",
         "",
         f"- Genome size: **{args.genome_bp:,} bp**",
-        f"- Python/primer3 in-process; single thread.",
+        "- Python/primer3 in-process; single thread.",
         "",
         "## Specificity search (in-silico PCR)",
         "",
@@ -167,6 +187,13 @@ def main():
         "| Templates | Successful | Total time | Per template |",
         "| ---: | ---: | ---: | ---: |",
         f"| {n_t} | {ok} | {design_t:.3f} s | {design_t / n_t * 1000:.1f} ms |",
+        "",
+        "## Placement (all 6 permutations per gene)",
+        "",
+        "| Genes | Primer pairs | Total time | Per gene |",
+        "| ---: | ---: | ---: | ---: |",
+        f"| {place_genes} | {place_pairs} | {place_t:.3f} s | "
+        f"{place_t / place_genes * 1000:.1f} ms |",
         "",
     ]
     report = "\n".join(lines)

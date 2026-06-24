@@ -196,6 +196,82 @@ def test_params_validation():
     assert good.validate() == []
 
 
+# --------------------------------------------------------------------------- #
+# Primer placement (upstream / internal / downstream control)
+# --------------------------------------------------------------------------- #
+def _placement_genome():
+    """Genome with a + strand gene at 200..800 on a 1000 bp contig."""
+    seq = _random_seq(1000, seed=99)
+    gene = {"chrom": "chr1", "gene_name": "g", "locus_tag": "L1",
+            "start": 200, "end": 800, "strand": 1}
+    return {"chr1": SeqRecord(Seq(seq), id="chr1")}, gene
+
+
+def test_placement_combos():
+    assert pd.placement_combos("internal") == [("internal", "internal")]
+    assert pd.placement_combos("flanking") == [("upstream", "downstream")]
+    assert pd.placement_combos(("upstream", "internal")) == [("upstream", "internal")]
+    # 'all' = valid permutations where forward is not 3' of reverse
+    combos = pd.placement_combos("all")
+    assert ("upstream", "downstream") in combos
+    assert ("downstream", "upstream") not in combos
+    assert len(combos) == 6
+
+
+def test_build_gene_template_regions():
+    genome, gene = _placement_genome()
+    template, regions = pd.build_gene_template(genome, gene, flank_size=150)
+    assert regions["upstream"] == (0, 150)
+    assert regions["internal"] == (150, 600)
+    assert regions["downstream"] == (750, 150)
+    assert len(template) == 900
+
+
+def test_design_flanking_places_primers_in_flanks():
+    genome, gene = _placement_genome()
+    params = pd.PrimerParams(product_min=100, product_max=2000)
+    results = pd.design_for_gene(genome, gene, params, flank_size=150, mode="flanking")
+    assert len(results) == 1
+    r = results[0]
+    assert r["placement"] == "upstream->downstream"
+    assert r["status"] == "OK"
+    # Forward primer should sit in the upstream flank, reverse in downstream flank;
+    # i.e. the amplicon must be larger than the gene body (600 bp).
+    assert r["product_size"] > 600
+
+
+def test_design_all_permutations():
+    genome, gene = _placement_genome()
+    params = pd.PrimerParams(product_min=80, product_max=2000)
+    results = pd.design_for_gene(genome, gene, params, flank_size=150, mode="all")
+    assert len(results) == 6
+    placements = {r["placement"] for r in results}
+    assert "upstream->downstream" in placements
+    assert "internal->internal" in placements
+
+
+def test_design_internal_is_default_single_row():
+    genome, gene = _placement_genome()
+    params = pd.PrimerParams(product_min=100, product_max=500)
+    results = pd.design_for_gene(genome, gene, params, flank_size=150)
+    assert len(results) == 1
+    assert results[0]["placement"] == "internal->internal"
+
+
+def test_placement_region_too_small():
+    genome, gene = _placement_genome()
+    params = pd.PrimerParams()
+    # No flank -> upstream region is empty, so a flanking design must fail clearly.
+    results = pd.design_for_gene(genome, gene, params, flank_size=0, mode="flanking")
+    assert "region too small" in results[0]["status"].lower()
+
+
+def test_p3_template_preserves_length():
+    assert len(pd._p3_template("acgtN-x ")) == len("acgtN-x ")
+    assert pd._p3_template("acgt") == "ACGT"
+    assert "N" in pd._p3_template("ACGT-ACGT")
+
+
 def test_result_row_matches_columns():
     template = _random_seq(800, seed=3)
     r = pd.design_primers_for_sequence("g", template, pd.PrimerParams())
