@@ -13,7 +13,8 @@ import primer_design as pd
 
 
 def _run_genome_gff(params, output_csv, genome_path, gff_path, target_names,
-                    flank_size, do_specificity, log, placement="internal"):
+                    flank_size, do_specificity, log, placement="internal",
+                    seed_len=0, max_mismatches=0):
     """Genome FASTA + GFF3 pipeline. ``log`` is a callable(str)."""
     genome = pd.load_genome(genome_path)
     log("Genome loaded")
@@ -52,7 +53,8 @@ def _run_genome_gff(params, output_csv, genome_path, gff_path, target_names,
                     max_prod = max(params.product_max, (r["product_size"] or 0) + 500)
                     spec = pd.in_silico_pcr(
                         r["forward"], r["reverse"], prepared_genome,
-                        min_product=50, max_product=max_prod)
+                        min_product=50, max_product=max_prod,
+                        seed_len=seed_len, max_mismatches=max_mismatches)
                     r["specificity"] = pd.specificity_label(spec)
                 else:
                     r["specificity"] = "Not tested"
@@ -199,6 +201,10 @@ def main():  # pragma: no cover - interactive GUI
     tk.Checkbutton(param_frame, text="Test primer specificity",
                    variable=check_specificity).grid(row=4, column=0, columnspan=2, sticky="w")
 
+    # Mismatch-tolerant specificity controls (seed_len=0 -> exact match).
+    seed_len_e = add_entry("3' seed (0=exact)", 5, 0, 0)
+    max_mm_e = add_entry("Max mismatches", 5, 2, 0)
+
     # Primer placement relative to the gene (genome+GFF mode only).
     placement_label = tk.Label(param_frame, text="Primer placement")
     placement_label.grid(row=4, column=2, sticky="e")
@@ -273,7 +279,9 @@ def main():  # pragma: no cover - interactive GUI
                     return
                 _run_genome_gff(params, output_csv, genome_entry.get(), gff_entry.get(),
                                 target_names, int(flank_e.get()), check_specificity.get(), log,
-                                placement=placement_choices[placement_var.get()])
+                                placement=placement_choices[placement_var.get()],
+                                seed_len=int(seed_len_e.get() or 0),
+                                max_mismatches=int(max_mm_e.get() or 0))
             else:
                 if not cds_entry.get():
                     messagebox.showerror("Error", "Select a CDS FASTA file.")
