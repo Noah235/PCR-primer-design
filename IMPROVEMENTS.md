@@ -7,6 +7,21 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 
 ## ✅ Done in this iteration
 
+### Primer placement control
+- **Choose where each primer lands relative to the gene.** Via Primer3's
+  `SEQUENCE_PRIMER_PAIR_OK_REGION_LIST`, the forward and reverse primers can be
+  constrained independently to the **upstream flank**, **inside the gene**, or
+  the **downstream flank**. Modes: `internal` (default, back-compatible),
+  `flanking` (upstream→downstream, e.g. knockout verification), `custom`
+  (any region pair), and `all` (every valid permutation, one output row each).
+  Implemented in `build_gene_template()`, `placement_combos()` and
+  `design_for_gene()`; exposed in both the GUI (dropdown) and CLI
+  (`--placement` / `--fwd-region` / `--rev-region`). Regression-tested
+  (`test_design_flanking_places_primers_in_flanks`, `test_design_all_permutations`)
+  and benchmarked (placement section in `benchmark.py`).
+- Template coordinates are preserved for region constraints (`_p3_template`
+  replaces non-ACGT with `N` instead of deleting it, so offsets stay valid).
+
 ### Accuracy
 - **Two-orientation in-silico PCR.** The original specificity check only looked
   for the forward primer on the top strand plus the reverse primer's

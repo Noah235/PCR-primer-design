@@ -31,6 +31,8 @@ logger = logging.getLogger("primer_design")
 
 # Characters that are valid, unambiguous DNA bases.
 _NON_DNA_RE = re.compile(r"[^ATGC]")
+# As above but keeps length (used for Primer3 templates where coords matter).
+_NON_DNA_N_RE = re.compile(r"[^ACGTN]")
 _SPLIT_RE = re.compile(r"[,\n\r;\t]+")
 
 
@@ -485,17 +487,27 @@ def specificity_label(result: dict) -> str:
 # --------------------------------------------------------------------------- #
 # Primer design
 # --------------------------------------------------------------------------- #
-def design_primers_for_sequence(
-    seq_id: str, template: str, params: PrimerParams
-) -> dict:
-    """Design a single best primer pair for one template.
+# Named regions of a gene template, ordered 5' -> 3'.
+PLACEMENT_REGIONS = ("upstream", "internal", "downstream")
 
-    Returns a result dict with primer sequences, Tm/GC, product size,
-    secondary-structure metrics and a status string. Never raises.
+
+def _region_index(name: str) -> int:
+    return PLACEMENT_REGIONS.index(name)
+
+
+def _p3_template(seq: str) -> str:
+    """Upper-case template for Primer3, preserving length (non-ACGT -> N).
+
+    Length must be preserved so that region coordinates stay valid; Primer3
+    tolerates ``N`` (governed by ``PRIMER_MAX_NS_ACCEPTED``).
     """
-    template = clean_sequence(template)
-    result = {
+    return _NON_DNA_N_RE.sub("N", str(seq).upper())
+
+
+def _new_result(seq_id: str, placement: str) -> dict:
+    return {
         "gene": seq_id,
+        "placement": placement,
         "forward": None,
         "reverse": None,
         "fwd_tm": None,
@@ -511,21 +523,57 @@ def design_primers_for_sequence(
         "status": "No suitable primers",
     }
 
-    if len(template) < params.min_size * 2:
-        result["status"] = f"Template too short ({len(template)} bp)"
+
+def design_primers_for_sequence(
+    seq_id: str,
+    template: str,
+    params: PrimerParams,
+    *,
+    fwd_region: Optional[Tuple[int, int]] = None,
+    rev_region: Optional[Tuple[int, int]] = None,
+    product_range: Optional[Tuple[int, int]] = None,
+    placement: str = "internal",
+) -> dict:
+    """Design a single best primer pair for one template.
+
+    Optional ``fwd_region`` / ``rev_region`` are ``(start, length)`` windows
+    (in template coordinates) constraining where the left / right primer may be
+    placed, via Primer3's ``SEQUENCE_PRIMER_PAIR_OK_REGION_LIST``. This is how
+    "forward upstream / reverse downstream" style placements are realised.
+    ``product_range`` overrides the parameter product-size window for this call
+    (needed when a placement spans flanks larger than the default window).
+
+    Returns a result dict with primer sequences, Tm/GC, product size,
+    secondary-structure metrics and a status string. Never raises.
+    """
+    p3_seq = _p3_template(template)
+    clean_len = len(clean_sequence(template))
+    result = _new_result(seq_id, placement)
+
+    if clean_len < params.min_size * 2:
+        result["status"] = f"Template too short ({clean_len} bp)"
         return result
-    if len(template) < params.product_min:
+    eff_min_product = (product_range or (params.product_min, params.product_max))[0]
+    if len(p3_seq) < eff_min_product:
         result["status"] = (
-            f"Template ({len(template)} bp) shorter than min product "
-            f"({params.product_min} bp)"
+            f"Template ({len(p3_seq)} bp) shorter than min product "
+            f"({eff_min_product} bp)"
         )
         return result
 
+    seq_args = {"SEQUENCE_ID": seq_id, "SEQUENCE_TEMPLATE": p3_seq}
+    if fwd_region is not None or rev_region is not None:
+        fl = fwd_region if fwd_region is not None else (-1, -1)
+        rl = rev_region if rev_region is not None else (-1, -1)
+        seq_args["SEQUENCE_PRIMER_PAIR_OK_REGION_LIST"] = [
+            [int(fl[0]), int(fl[1]), int(rl[0]), int(rl[1])]
+        ]
+    global_args = params.to_primer3_global()
+    if product_range is not None:
+        global_args["PRIMER_PRODUCT_SIZE_RANGE"] = [[int(product_range[0]), int(product_range[1])]]
+
     try:
-        primers = primer3.bindings.design_primers(
-            {"SEQUENCE_ID": seq_id, "SEQUENCE_TEMPLATE": template},
-            params.to_primer3_global(),
-        )
+        primers = primer3.bindings.design_primers(seq_args, global_args)
     except Exception as exc:
         result["status"] = f"Primer3 error: {str(exc)[:80]}"
         return result
@@ -561,9 +609,112 @@ def design_primers_for_sequence(
     return result
 
 
+def build_gene_template(
+    genome: Dict, gene: dict, flank_size: int
+) -> Optional[Tuple[str, Dict[str, Tuple[int, int]]]]:
+    """Assemble ``5'flank + gene + 3'flank`` (in gene orientation) + region map.
+
+    Returns ``(template, {region_name: (start, length)})`` or ``None`` if the
+    contig is missing. Region lengths reflect what was actually available
+    (flanks are clipped at contig ends).
+    """
+    rec = genome.get(gene["chrom"])
+    if rec is None:
+        return None
+    start, end, strand = gene["start"], gene["end"], gene["strand"]
+    five = rec.seq[max(0, start - flank_size):start]
+    three = rec.seq[end:min(len(rec.seq), end + flank_size)]
+    gene_seq = rec.seq[start:end]
+    if strand == -1:
+        five, three = three.reverse_complement(), five.reverse_complement()
+        gene_seq = gene_seq.reverse_complement()
+    five, gene_seq, three = str(five), str(gene_seq), str(three)
+    template = five + gene_seq + three
+    regions = {
+        "upstream": (0, len(five)),
+        "internal": (len(five), len(gene_seq)),
+        "downstream": (len(five) + len(gene_seq), len(three)),
+    }
+    return template, regions
+
+
+def placement_combos(mode) -> List[Tuple[str, str]]:
+    """Resolve a placement ``mode`` into ``[(fwd_region, rev_region), ...]``.
+
+    ``mode`` may be:
+
+    * ``"internal"``  – both primers inside the gene (default),
+    * ``"flanking"``  – forward in the upstream flank, reverse in the downstream
+      flank (amplifies the whole gene + flanks, e.g. knockout verification),
+    * ``"all"``       – every valid permutation where the forward region is not
+      3' of the reverse region (6 combinations),
+    * a ``(fwd, rev)`` tuple of region names for a custom placement,
+    * a list of such tuples.
+    """
+    if mode == "internal":
+        return [("internal", "internal")]
+    if mode == "flanking":
+        return [("upstream", "downstream")]
+    if mode == "all":
+        return [(f, r) for f in PLACEMENT_REGIONS for r in PLACEMENT_REGIONS
+                if _region_index(f) <= _region_index(r)]
+    if isinstance(mode, tuple):
+        return [mode]
+    if isinstance(mode, list):
+        return list(mode)
+    raise ValueError(f"Unknown placement mode: {mode!r}")
+
+
+def design_for_gene(
+    genome: Dict, gene: dict, params: PrimerParams, flank_size: int, mode="internal"
+) -> List[dict]:
+    """Design primers for one gene under one or more placement modes.
+
+    Returns one result dict per requested placement. For ``mode="internal"``
+    with no flanks this is a single internal design (back-compatible).
+    """
+    name = gene["gene_name"] or gene["locus_tag"]
+    combos = placement_combos(mode)
+    built = build_gene_template(genome, gene, flank_size)
+    if built is None:
+        r = _new_result(name, combos[0][0] + "->" + combos[0][1])
+        r["status"] = "Contig not found"
+        return [r]
+    template, regions = built
+
+    results: List[dict] = []
+    for fwd_name, rev_name in combos:
+        label = f"{fwd_name}->{rev_name}"
+        if _region_index(fwd_name) > _region_index(rev_name):
+            r = _new_result(name, label)
+            r["status"] = "Invalid placement (forward 3' of reverse)"
+            results.append(r)
+            continue
+        freg, rreg = regions[fwd_name], regions[rev_name]
+        if freg[1] < params.min_size or rreg[1] < params.min_size:
+            r = _new_result(name, label)
+            r["status"] = (
+                f"Region too small ({fwd_name}={freg[1]}bp, {rev_name}={rreg[1]}bp; "
+                f"need >= {params.min_size}). Increase flank size?"
+            )
+            results.append(r)
+            continue
+        # Feasible product window for this region pair.
+        max_prod = min(len(template), (rreg[0] + rreg[1]) - freg[0])
+        product_range = (params.product_min, max_prod)
+        results.append(
+            design_primers_for_sequence(
+                name, template, params,
+                fwd_region=freg, rev_region=rreg,
+                product_range=product_range, placement=label,
+            )
+        )
+    return results
+
+
 # Column order shared by CSV writers and the GUI.
 RESULT_COLUMNS = [
-    "Gene Name",
+    "Gene Name", "Placement",
     "Forward Primer", "Fwd Tm", "Fwd GC%",
     "Reverse Primer", "Rev Tm", "Rev GC%",
     "Product Length",
@@ -578,7 +729,7 @@ def result_to_row(r: dict) -> list:
     def s(v):
         return "N/A" if v is None else v
     return [
-        r["gene"],
+        r["gene"], r.get("placement", "internal"),
         s(r["forward"]), s(r["fwd_tm"]), s(r["fwd_gc"]),
         s(r["reverse"]), s(r["rev_tm"]), s(r["rev_gc"]),
         s(r["product_size"]),

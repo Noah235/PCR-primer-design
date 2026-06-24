@@ -19,6 +19,11 @@ GUI** or a **headless CLI**, with all logic in an importable, tested core module
   primer-pair hetero-dimer Tm — so you can spot primers likely to fail.
 - **Internally consistent Tm** (reported under the same salt conditions used for
   design).
+- **Primer placement control** — choose where each primer lands relative to the
+  gene: both inside the gene (default), forward in the upstream flank + reverse
+  in the downstream flank (*flanking*, e.g. knockout verification), any custom
+  upstream/internal/downstream combination, or **all permutations** at once
+  (one row per placement).
 - Case-insensitive gene/locus-tag filtering (`#` comment lines are ignored).
 - CSV output + extracted-sequence FASTA.
 
@@ -60,6 +65,14 @@ python primer_cli.py genome \
 # CDS FASTA, all records
 python primer_cli.py cds --cds cds.fasta -o primers.csv
 
+# Primer placement: amplify each gene from upstream flank to downstream flank
+python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \
+    --placement flanking --flank 250 -o flanking_primers.csv
+
+# Every placement permutation (6 rows per gene), or a custom combination
+python primer_cli.py genome ... --placement all
+python primer_cli.py genome ... --placement custom --fwd-region upstream --rev-region internal
+
 python primer_cli.py genome --help    # full parameter list
 ```
 
@@ -80,9 +93,13 @@ print(pd.specificity_label(spec))
 
 ## Output (CSV columns)
 
-Gene name · Forward/Reverse primer · Tm · GC% · Product length ·
+Gene name · Placement · Forward/Reverse primer · Tm · GC% · Product length ·
 Hairpin Tm (F/R) · Self-dimer Tm (F/R) · Hetero-dimer Tm ·
 Specificity check · Status.
+
+The **Placement** column records where the pair was designed (e.g.
+`internal->internal`, `upstream->downstream`). With `--placement all` you get one
+row per permutation per gene.
 
 In genome mode an additional `*_extracted_sequences.fasta` is written with each
 gene's 5′ flank, 3′ flank and coding region.
