@@ -1,126 +1,126 @@
 # PCR Primer Design with Specificity Testing
 
-A Python-based graphical user interface (GUI) tool for designing PCR primers from a reference genome and gene annotations, with automated specificity testing via in-silico PCR simulation.
+A Python tool for designing PCR primers from a reference genome + annotations
+(or a CDS FASTA), with in-silico specificity testing. Usable as a **Tkinter
+GUI** or a **headless CLI**, with all logic in an importable, tested core module.
 
 ---
 
 ## Features
 
-- Load reference genome in FASTA format.
-- Parse gene coordinates from GFF3 annotation files.
-- Extract gene sequences with customizable upstream/downstream flanking regions.
-- Design primers for each gene using Primer3 with flexible parameters:
-  - Primer size (min, optimal, max)
-  - Melting temperature (Tm) range
-  - GC content range
-  - PCR product size range
-- Perform primer specificity testing by searching for potential amplicons within the genome.
-- Output primer information and specificity results to CSV file.
-- User-friendly Tkinter GUI for loading files, setting parameters, and running the pipeline.
-- Real-time progress and status display within the GUI.
+- Two input modes:
+  - **Genome FASTA + GFF3** — extract each gene (with optional flanks) and design primers.
+  - **CDS FASTA only** — design directly from coding sequences.
+- Primer design via Primer3 with tunable size, Tm, GC%, product size and GC-clamp.
+- **Accurate, two-orientation in-silico PCR** specificity check that counts every
+  predicted amplicon across the genome (catches off-targets the naive
+  single-orientation search misses).
+- **Secondary-structure reporting** per primer: hairpin Tm, self-dimer Tm, and
+  primer-pair hetero-dimer Tm — so you can spot primers likely to fail.
+- **Internally consistent Tm** (reported under the same salt conditions used for
+  design).
+- Case-insensitive gene/locus-tag filtering (`#` comment lines are ignored).
+- CSV output + extracted-sequence FASTA.
 
 ---
 
 ## Installation
 
-Ensure Python 3 is installed. Recommended to use a virtual environment.
+```bash
+pip install -r requirements.txt
+# or, with conda:
+conda env create -f environment.yml && conda activate pcr-primer-design
+```
 
-Install required Python packages via pip:
-
-pip install biopython primer3-py
-
+Requires Python 3.9+, `biopython` and `primer3-py`. The GUI additionally needs
+`tkinter` (bundled with most Python installs; on Debian/Ubuntu:
+`sudo apt install python3-tk`). The CLI and core library do **not** need tkinter.
 
 ---
 
 ## Usage
 
-1. **Run GUI**  
-   Launch the GUI application (`enhanced_primer_gui.py`).
+### GUI
 
-2. **Input Files**  
-   - Select the reference genome FASTA file.
-   - Select the corresponding GFF3 gene annotation file.
-   - Provide the output CSV filename.
+```bash
+python enhanced_primer_gui.py
+```
 
-3. **Set Primer Design Parameters**  
-   Adjust primer size, melting temperature, GC content, product size, flank size, etc., according to your experimental needs.
+Pick an input mode, select files, set parameters, optionally enable specificity
+testing, and click **Design Primers**.
 
-4. **Enable Specificity Testing**  
-   Check or uncheck the option to test primer specificity against the genome.
+### CLI (headless / batch)
 
-5. **Start Pipeline**  
-   Click the "Run" button to initiate sequence extraction, primer design, and specificity testing.
+```bash
+# Genome + GFF3, three genes, with specificity testing
+python primer_cli.py genome \
+    --genome genome.fasta --gff annotation.gff3 \
+    --genes sulA,opgH,galU --specificity -o primers.csv
 
-6. **View Results**  
-   Monitor progress in the results window.  
-   After completion, output files will be saved:
-   - CSV file containing primers and specificity information.
-   - FASTA file of extracted gene sequences with flanks.
+# CDS FASTA, all records
+python primer_cli.py cds --cds cds.fasta -o primers.csv
 
----
+python primer_cli.py genome --help    # full parameter list
+```
 
-## Output
+### As a library
 
-- **CSV File** containing:
-  - Gene name
-  - Forward and reverse primer sequences
-  - Calculated melting temperatures (Tm)
-  - GC content percentages
-  - Expected PCR product size
-  - Specificity test status (e.g., specific, non-specific, error)
-  - Status indicator for primer design success
+```python
+import primer_design as pd
 
-- **FASTA File** with extracted gene sequences including user-defined flanking regions.
+params = pd.PrimerParams(opt_tm=60, product_min=100, product_max=600)
+result = pd.design_primers_for_sequence("myGene", template_seq, params)
+
+genome = pd.prepare_genome(pd.load_genome("genome.fasta"))
+spec = pd.in_silico_pcr(result["forward"], result["reverse"], genome)
+print(pd.specificity_label(spec))
+```
 
 ---
 
-## How It Works
+## Output (CSV columns)
 
-- The program parses the genome and annotation files.
-- For each gene, it extracts the sequence and flanking regions.
-- Primer3 software is used to generate primers with user-specified constraints.
-- Each primer pair is checked for genome-wide specificity by locating all potential binding sites and predicted amplicons via simple in-silico PCR search.
-- Results are saved and displayed for user inspection.
+Gene name · Forward/Reverse primer · Tm · GC% · Product length ·
+Hairpin Tm (F/R) · Self-dimer Tm (F/R) · Hetero-dimer Tm ·
+Specificity check · Status.
 
----
-
-## Dependencies
-
-- [Biopython](https://biopython.org/) for sequence parsing and manipulation.
-- [primer3-py](https://pypi.org/project/primer3-py/) for primer design functionalities.
-- Python standard libraries: `tkinter`, `csv`, `os`, `subprocess`, `tempfile`.
+In genome mode an additional `*_extracted_sequences.fasta` is written with each
+gene's 5′ flank, 3′ flank and coding region.
 
 ---
 
-## Example Parameter Settings
+## Project layout
 
-- Min/Opt/Max primer size: 18 / 20 / 25 bases
-- Min/Opt/Max Tm: 58 / 60 / 60 °C
-- GC content range: 20% - 50%
-- PCR product size range: 35 - 5000 bp
-- Flanking sequence size: 100 bp
-
----
-
-## Notes and Limitations
-
-- The in-silico specificity check uses exact sequence matching and simple reverse complement search without allowing mismatches.
-- Experimental validation is recommended to confirm primer performance.
-- Specificity testing may be slow for very large genomes or high numbers of primers.
+| File | Purpose |
+| --- | --- |
+| `primer_design.py` | Core logic (no GUI dependency) — import & test this |
+| `primer_cli.py` | Command-line front-end |
+| `enhanced_primer_gui.py` | Tkinter GUI front-end |
+| `tests/` | pytest correctness suite |
+| `benchmark.py` | Speed benchmark (writes `benchmark_results.md`) |
+| `IMPROVEMENTS.md` | Roadmap and changelog |
 
 ---
 
-## How to Extend
+## Development
 
-- Add mismatch tolerance in specificity search.
-- Integrate with NCBI Primer-BLAST for enhanced specificity validation.
-- Export additional metrics like self-dimers, hairpins, and secondary structure scores.
-- Support batch processing from command line.
-
----
-
-## Contact
-
-For questions or support, please contact the developer.
+```bash
+pytest -q                          # run tests
+python benchmark.py                # measure performance
+flake8 . --select=E9,F63,F7,F82    # CI-blocking lint
+```
 
 ---
+
+## Notes & limitations
+
+- The in-silico specificity check uses **exact** matching (no mismatches). It is
+  fast and good for screening, but experimental validation is still recommended.
+  See `IMPROVEMENTS.md` for the plan to add mismatch-tolerant / BLAST-based
+  specificity.
+- Specificity scales as O(genome × primer pairs); for whole-genome panels a
+  k-mer index is the recommended next step.
+
+## How to extend
+
+See **`IMPROVEMENTS.md`** for a prioritised roadmap.
