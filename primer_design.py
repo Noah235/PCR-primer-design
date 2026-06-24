@@ -1,0 +1,602 @@
+"""Core PCR primer-design logic.
+
+This module contains all of the sequence / primer logic with **no GUI
+dependency**, so it can be imported, unit-tested and benchmarked headlessly,
+driven from the command line (``primer_cli.py``) or wrapped by the Tkinter GUI
+(``enhanced_primer_gui.py``).
+
+Accuracy-relevant design notes
+------------------------------
+* Tm is reported with the *same* salt / dNTP / DNA concentrations that Primer3
+  used to design the primer, so the reported Tm is internally consistent
+  (see :class:`ThermoParams`).
+* In-silico specificity is a true two-orientation amplicon search: every
+  exact binding site of both primers is found on the top strand in both the
+  forward and reverse sense, and any pair that can form a product within the
+  size window is counted (see :func:`in_silico_pcr`).
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Optional, Tuple
+
+from Bio import SeqIO
+from Bio.Seq import Seq
+import primer3
+
+logger = logging.getLogger("primer_design")
+
+# Characters that are valid, unambiguous DNA bases.
+_NON_DNA_RE = re.compile(r"[^ATGC]")
+_SPLIT_RE = re.compile(r"[,\n\r;\t]+")
+
+
+# --------------------------------------------------------------------------- #
+# Parameter containers
+# --------------------------------------------------------------------------- #
+@dataclass
+class ThermoParams:
+    """Reaction conditions shared between design and Tm reporting."""
+
+    mv_conc: float = 50.0      # monovalent cation (mM)
+    dv_conc: float = 1.5       # divalent cation (mM)
+    dntp_conc: float = 0.6     # dNTP (mM)
+    dna_conc: float = 50.0     # primer/oligo (nM)
+
+
+@dataclass
+class PrimerParams:
+    """User-tunable primer-design constraints."""
+
+    min_size: int = 18
+    opt_size: int = 20
+    max_size: int = 25
+    min_tm: float = 57.0
+    opt_tm: float = 60.0
+    max_tm: float = 63.0
+    min_gc: float = 40.0
+    max_gc: float = 60.0
+    product_min: int = 100
+    product_max: int = 1000
+    gc_clamp: int = 1
+    max_poly_x: int = 4
+    num_return: int = 1
+    thermo: ThermoParams = field(default_factory=ThermoParams)
+
+    def validate(self) -> List[str]:
+        """Return a list of human-readable problems (empty == OK)."""
+        errs: List[str] = []
+        if not (self.min_size <= self.opt_size <= self.max_size):
+            errs.append("Primer size must satisfy min <= opt <= max.")
+        if not (self.min_tm <= self.opt_tm <= self.max_tm):
+            errs.append("Tm must satisfy min <= opt <= max.")
+        if not (0 <= self.min_gc <= self.max_gc <= 100):
+            errs.append("GC%% must satisfy 0 <= min <= max <= 100.")
+        if not (0 < self.product_min <= self.product_max):
+            errs.append("Product size must satisfy 0 < min <= max.")
+        if self.min_size < 1:
+            errs.append("Primer min size must be >= 1.")
+        return errs
+
+    def to_primer3_global(self) -> dict:
+        """Translate into a Primer3 global-args dictionary."""
+        return {
+            "PRIMER_OPT_SIZE": self.opt_size,
+            "PRIMER_MIN_SIZE": self.min_size,
+            "PRIMER_MAX_SIZE": self.max_size,
+            "PRIMER_OPT_TM": self.opt_tm,
+            "PRIMER_MIN_TM": self.min_tm,
+            "PRIMER_MAX_TM": self.max_tm,
+            "PRIMER_MIN_GC": self.min_gc,
+            "PRIMER_MAX_GC": self.max_gc,
+            "PRIMER_NUM_RETURN": max(1, self.num_return),
+            "PRIMER_PRODUCT_SIZE_RANGE": [[self.product_min, self.product_max]],
+            "PRIMER_GC_CLAMP": self.gc_clamp,
+            "PRIMER_MAX_POLY_X": self.max_poly_x,
+            "PRIMER_MAX_NS_ACCEPTED": 0,
+            "PRIMER_MAX_SELF_ANY": 8.0,
+            "PRIMER_MAX_SELF_END": 3.0,
+            "PRIMER_PAIR_MAX_COMPL_ANY": 8.0,
+            "PRIMER_PAIR_MAX_COMPL_END": 3.0,
+            # Keep reported Tm consistent with design conditions.
+            "PRIMER_SALT_MONOVALENT": self.thermo.mv_conc,
+            "PRIMER_SALT_DIVALENT": self.thermo.dv_conc,
+            "PRIMER_DNTP_CONC": self.thermo.dntp_conc,
+            "PRIMER_DNA_CONC": self.thermo.dna_conc,
+        }
+
+
+# --------------------------------------------------------------------------- #
+# Sequence helpers
+# --------------------------------------------------------------------------- #
+def clean_sequence(seq: Optional[str]) -> str:
+    """Upper-case and strip everything that is not an unambiguous DNA base."""
+    if not seq:
+        return ""
+    return _NON_DNA_RE.sub("", str(seq).upper())
+
+
+def calc_gc(seq: Optional[str]) -> float:
+    """GC%% of the unambiguous bases of ``seq`` (0.0 for empty/invalid)."""
+    clean = clean_sequence(seq)
+    if not clean:
+        return 0.0
+    gc = clean.count("G") + clean.count("C")
+    return round(100.0 * gc / len(clean), 2)
+
+
+def calc_tm(seq: Optional[str], thermo: Optional[ThermoParams] = None) -> Optional[float]:
+    """Nearest-neighbour Tm via Primer3, or ``None`` if it cannot be computed."""
+    clean = clean_sequence(seq)
+    if not clean:
+        return None
+    thermo = thermo or ThermoParams()
+    try:
+        return round(
+            primer3.calc_tm(
+                clean,
+                mv_conc=thermo.mv_conc,
+                dv_conc=thermo.dv_conc,
+                dntp_conc=thermo.dntp_conc,
+                dna_conc=thermo.dna_conc,
+            ),
+            2,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Tm calculation failed for %r: %s", clean, exc)
+        return None
+
+
+def analyze_oligo(seq: str, thermo: Optional[ThermoParams] = None) -> dict:
+    """Return secondary-structure metrics for a single oligo.
+
+    ``hairpin_tm`` and ``homodimer_tm`` are the melting temperatures of the
+    most stable self-structures; high values (close to the annealing temp)
+    indicate a primer prone to forming structure instead of binding template.
+    """
+    clean = clean_sequence(seq)
+    thermo = thermo or ThermoParams()
+    out = {"hairpin_tm": None, "homodimer_tm": None}
+    if not clean:
+        return out
+    kw = dict(
+        mv_conc=thermo.mv_conc,
+        dv_conc=thermo.dv_conc,
+        dntp_conc=thermo.dntp_conc,
+        dna_conc=thermo.dna_conc,
+    )
+    try:
+        out["hairpin_tm"] = round(primer3.calc_hairpin(clean, **kw).tm, 2)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("hairpin calc failed: %s", exc)
+    try:
+        out["homodimer_tm"] = round(primer3.calc_homodimer(clean, **kw).tm, 2)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("homodimer calc failed: %s", exc)
+    return out
+
+
+def heterodimer_tm(
+    seq_a: str, seq_b: str, thermo: Optional[ThermoParams] = None
+) -> Optional[float]:
+    """Tm of the most stable duplex between two oligos (primer-dimer risk)."""
+    a, b = clean_sequence(seq_a), clean_sequence(seq_b)
+    if not a or not b:
+        return None
+    thermo = thermo or ThermoParams()
+    try:
+        return round(
+            primer3.calc_heterodimer(
+                a, b,
+                mv_conc=thermo.mv_conc,
+                dv_conc=thermo.dv_conc,
+                dntp_conc=thermo.dntp_conc,
+                dna_conc=thermo.dna_conc,
+            ).tm,
+            2,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("heterodimer calc failed: %s", exc)
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# I/O: genome, CDS, GFF3
+# --------------------------------------------------------------------------- #
+def load_genome(fasta_file: str) -> Dict[str, "SeqIO.SeqRecord"]:
+    """Load a (multi-)FASTA genome into a ``{id: SeqRecord}`` dict."""
+    genome = SeqIO.to_dict(SeqIO.parse(fasta_file, "fasta"))
+    if not genome:
+        raise ValueError(f"No sequences found in FASTA file: {fasta_file}")
+    return genome
+
+
+def load_cds_sequences(cds_file: str) -> Dict[str, dict]:
+    """Load CDS records keyed by lower-cased gene name / locus tag / id."""
+    cds_dict: Dict[str, dict] = {}
+    for record in SeqIO.parse(cds_file, "fasta"):
+        header = record.description
+        gene_name = None
+        if "gene=" in header:
+            gene_name = header.split("gene=")[1].split()[0].strip("[]")
+        elif "locus_tag=" in header:
+            gene_name = header.split("locus_tag=")[1].split()[0].strip("[]")
+        else:
+            gene_name = record.id.split("|")[0] if "|" in record.id else record.id
+        if gene_name:
+            cds_dict[gene_name.lower()] = {
+                "sequence": str(record.seq),
+                "id": record.id,
+                "description": record.description,
+            }
+    return cds_dict
+
+
+def parse_gff3_full(gff_file: str) -> List[dict]:
+    """Parse all ``gene`` features from a GFF3 file (0-based start, half-open)."""
+    genes: List[dict] = []
+    with open(gff_file) as handle:
+        for line in handle:
+            if line.startswith("#") or not line.strip():
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 9 or fields[2] != "gene":
+                continue
+            chrom, _, _, start, end, _, strand, _, attr = fields[:9]
+            locus_tag = "unknown"
+            gene_name = None
+            for token in attr.split(";"):
+                token = token.strip()
+                if token.startswith("locus_tag="):
+                    locus_tag = token.split("=", 1)[1]
+                elif token.startswith("gene="):
+                    gene_name = token.split("=", 1)[1]
+                elif token.startswith("Name=") and gene_name is None:
+                    gene_name = token.split("=", 1)[1]
+            try:
+                start_i, end_i = int(start) - 1, int(end)
+            except ValueError:
+                logger.warning("Skipping gene with non-integer coords: %s", line.strip())
+                continue
+            genes.append(
+                {
+                    "chrom": chrom,
+                    "locus_tag": locus_tag,
+                    "gene_name": gene_name,
+                    "start": start_i,
+                    "end": end_i,
+                    "strand": 1 if strand == "+" else -1,
+                }
+            )
+    return genes
+
+
+def parse_target_names(raw: str) -> List[str]:
+    """Parse a free-text gene list, ignoring ``#`` comment lines and blanks.
+
+    This fixes the placeholder bug where example comment text was treated as
+    real gene filters.
+    """
+    if not raw:
+        return []
+    names: List[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for token in _SPLIT_RE.split(line):
+            token = token.strip().lower()
+            if token and not token.startswith("#"):
+                names.append(token)
+    # De-duplicate while preserving order.
+    seen = set()
+    return [n for n in names if not (n in seen or seen.add(n))]
+
+
+def filter_genes_by_names(
+    all_genes: List[dict], target_names: str
+) -> Tuple[List[dict], List[str], List[str]]:
+    """Filter genes by name / locus tag (case-insensitive).
+
+    Returns ``(filtered_genes, found_names, not_found_names)``.
+    An empty filter returns *all* genes.
+    """
+    names = parse_target_names(target_names)
+    if not names:
+        return all_genes, [], []
+
+    wanted = set(names)
+    filtered: List[dict] = []
+    found: set = set()
+    for gene in all_genes:
+        gene_name_lower = (gene["gene_name"] or "").lower()
+        locus_tag_lower = (gene["locus_tag"] or "").lower()
+        if gene_name_lower in wanted or locus_tag_lower in wanted:
+            filtered.append(gene)
+            found.add(gene_name_lower if gene_name_lower in wanted else locus_tag_lower)
+
+    not_found = [n for n in names if n not in found]
+    return filtered, sorted(found), not_found
+
+
+# --------------------------------------------------------------------------- #
+# Sequence extraction
+# --------------------------------------------------------------------------- #
+def get_gene_sequence(genome: Dict, gene: dict) -> str:
+    """Return the (strand-corrected) coding sequence string for ``gene``."""
+    rec = genome.get(gene["chrom"])
+    if rec is None:
+        return ""
+    seq = rec.seq[gene["start"]:gene["end"]]
+    if gene["strand"] == -1:
+        seq = seq.reverse_complement()
+    return str(seq)
+
+
+def extract_sequences_to_fasta(
+    genome: Dict, gene_list: List[dict], output_file: str, flank_size: int = 100
+) -> None:
+    """Write 5' flank, 3' flank and gene region for each gene to a FASTA file."""
+    with open(output_file, "w") as out_f:
+        for gene in gene_list:
+            chrom = gene["chrom"]
+            gene_name = gene["gene_name"] or gene["locus_tag"]
+            locus = gene["locus_tag"]
+            strand = gene["strand"]
+            start, end = gene["start"], gene["end"]
+            rec = genome.get(chrom)
+            if rec is None:
+                continue
+
+            five_seq = rec.seq[max(0, start - flank_size):start]
+            three_seq = rec.seq[end:min(len(rec.seq), end + flank_size)]
+            gene_seq = rec.seq[start:end]
+            if strand == -1:
+                five_seq, three_seq = three_seq.reverse_complement(), five_seq.reverse_complement()
+                gene_seq = gene_seq.reverse_complement()
+
+            def write_record(identifier, seq, region_type):
+                out_f.write(f"; ---------- {region_type} ----------\n")
+                out_f.write(f">{identifier} | gene={gene_name}\n")
+                s = str(seq)
+                for i in range(0, len(s), 60):
+                    out_f.write(s[i:i + 60] + "\n")
+                out_f.write("\n")
+
+            write_record(f"{locus}_5prime_flank", five_seq, "5prime_flank")
+            write_record(f"{locus}_3prime_flank", three_seq, "3prime_flank")
+            write_record(f"{locus}_gene", gene_seq, "gene")
+
+
+# --------------------------------------------------------------------------- #
+# In-silico specificity
+# --------------------------------------------------------------------------- #
+def _find_all(sub: str, seq: str) -> List[int]:
+    """Return every start index of ``sub`` in ``seq`` (overlapping)."""
+    positions: List[int] = []
+    if not sub:
+        return positions
+    start = 0
+    while True:
+        idx = seq.find(sub, start)
+        if idx == -1:
+            break
+        positions.append(idx)
+        start = idx + 1
+    return positions
+
+
+def prepare_genome(genome: Dict) -> Dict[str, str]:
+    """Pre-clean a genome once into ``{chrom: cleaned_upper_string}``.
+
+    Cleaning (a regex pass over each contig) is the dominant per-call cost in
+    specificity testing, so do it once and reuse the result across every primer
+    pair instead of re-cleaning the whole genome for each one.
+    """
+    prepared: Dict[str, str] = {}
+    for chrom, rec in genome.items():
+        prepared[chrom] = rec if isinstance(rec, str) else clean_sequence(str(rec.seq))
+    return prepared
+
+
+def in_silico_pcr(
+    forward_primer: str,
+    reverse_primer: str,
+    genome: Dict,
+    min_product: int = 50,
+    max_product: int = 5000,
+) -> dict:
+    """Count predicted amplicons for a primer pair across a loaded genome.
+
+    ``genome`` may be a ``{chrom: SeqRecord}`` dict or a pre-cleaned
+    ``{chrom: str}`` dict from :func:`prepare_genome` (preferred for batches —
+    it avoids re-cleaning the genome for every primer pair).
+
+    Both primers are searched in *both* senses on every contig:
+
+    * forward-acting site = primer sequence found on the top strand (primes
+      rightward),
+    * reverse-acting site = reverse-complement of the primer found on the top
+      strand (primes leftward).
+
+    Any forward-acting site upstream of a reverse-acting site that yields a
+    product within ``[min_product, max_product]`` is an amplicon. This catches
+    off-targets the original one-orientation search missed.
+
+    Returns ``{"count": int, "amplicons": [(chrom, start, end, size), ...]}``.
+    """
+    fwd = clean_sequence(forward_primer)
+    rev = clean_sequence(reverse_primer)
+    if len(fwd) < 10 or len(rev) < 10:
+        return {"count": -1, "amplicons": [], "error": "Primer too short / invalid"}
+
+    primers = [fwd, rev]
+    rev_comps = {p: str(Seq(p).reverse_complement()) for p in primers}
+
+    amplicons: List[Tuple[str, int, int, int]] = []
+    for chrom, rec in genome.items():
+        top = rec if isinstance(rec, str) else clean_sequence(str(rec.seq))
+        if not top:
+            continue
+
+        # forward-acting: (5'-end index, primer length)
+        fwd_sites: List[Tuple[int, int]] = []
+        # reverse-acting: (footprint left index, primer length)
+        rev_sites: List[Tuple[int, int]] = []
+        for p in primers:
+            for pos in _find_all(p, top):
+                fwd_sites.append((pos, len(p)))
+            for pos in _find_all(rev_comps[p], top):
+                rev_sites.append((pos, len(p)))
+
+        if not fwd_sites or not rev_sites:
+            continue
+
+        rev_sites.sort()
+        for f_left, _ in fwd_sites:
+            for r_left, r_len in rev_sites:
+                if r_left < f_left:
+                    continue
+                product = (r_left + r_len) - f_left
+                if product < min_product:
+                    continue
+                if product > max_product:
+                    break  # rev_sites sorted; further ones only larger
+                amplicons.append((chrom, f_left, r_left + r_len, product))
+
+    return {"count": len(amplicons), "amplicons": amplicons}
+
+
+def specificity_label(result: dict) -> str:
+    """Human-readable summary of :func:`in_silico_pcr` output."""
+    count = result.get("count", -1)
+    if count < 0:
+        return result.get("error", "Invalid")
+    if count == 0:
+        return "No amplicons found"
+    if count == 1:
+        return "Specific (1 amplicon)"
+    return f"Non-specific ({count} amplicons)"
+
+
+# --------------------------------------------------------------------------- #
+# Primer design
+# --------------------------------------------------------------------------- #
+def design_primers_for_sequence(
+    seq_id: str, template: str, params: PrimerParams
+) -> dict:
+    """Design a single best primer pair for one template.
+
+    Returns a result dict with primer sequences, Tm/GC, product size,
+    secondary-structure metrics and a status string. Never raises.
+    """
+    template = clean_sequence(template)
+    result = {
+        "gene": seq_id,
+        "forward": None,
+        "reverse": None,
+        "fwd_tm": None,
+        "fwd_gc": None,
+        "rev_tm": None,
+        "rev_gc": None,
+        "product_size": None,
+        "fwd_hairpin_tm": None,
+        "rev_hairpin_tm": None,
+        "fwd_homodimer_tm": None,
+        "rev_homodimer_tm": None,
+        "heterodimer_tm": None,
+        "status": "No suitable primers",
+    }
+
+    if len(template) < params.min_size * 2:
+        result["status"] = f"Template too short ({len(template)} bp)"
+        return result
+    if len(template) < params.product_min:
+        result["status"] = (
+            f"Template ({len(template)} bp) shorter than min product "
+            f"({params.product_min} bp)"
+        )
+        return result
+
+    try:
+        primers = primer3.bindings.design_primers(
+            {"SEQUENCE_ID": seq_id, "SEQUENCE_TEMPLATE": template},
+            params.to_primer3_global(),
+        )
+    except Exception as exc:
+        result["status"] = f"Primer3 error: {str(exc)[:80]}"
+        return result
+
+    fwd = primers.get("PRIMER_LEFT_0_SEQUENCE")
+    rev = primers.get("PRIMER_RIGHT_0_SEQUENCE")
+    if not fwd or not rev:
+        explain = primers.get("PRIMER_PAIR_EXPLAIN", "")
+        if explain:
+            result["status"] = f"No suitable primers ({explain})"
+        return result
+
+    thermo = params.thermo
+    fwd_struct = analyze_oligo(fwd, thermo)
+    rev_struct = analyze_oligo(rev, thermo)
+    result.update(
+        {
+            "forward": fwd,
+            "reverse": rev,
+            "fwd_tm": calc_tm(fwd, thermo),
+            "fwd_gc": calc_gc(fwd),
+            "rev_tm": calc_tm(rev, thermo),
+            "rev_gc": calc_gc(rev),
+            "product_size": primers.get("PRIMER_PAIR_0_PRODUCT_SIZE"),
+            "fwd_hairpin_tm": fwd_struct["hairpin_tm"],
+            "rev_hairpin_tm": rev_struct["hairpin_tm"],
+            "fwd_homodimer_tm": fwd_struct["homodimer_tm"],
+            "rev_homodimer_tm": rev_struct["homodimer_tm"],
+            "heterodimer_tm": heterodimer_tm(fwd, rev, thermo),
+            "status": "OK",
+        }
+    )
+    return result
+
+
+# Column order shared by CSV writers and the GUI.
+RESULT_COLUMNS = [
+    "Gene Name",
+    "Forward Primer", "Fwd Tm", "Fwd GC%",
+    "Reverse Primer", "Rev Tm", "Rev GC%",
+    "Product Length",
+    "Fwd Hairpin Tm", "Rev Hairpin Tm",
+    "Fwd SelfDimer Tm", "Rev SelfDimer Tm", "Hetero-dimer Tm",
+    "Specificity Check", "Status",
+]
+
+
+def result_to_row(r: dict) -> list:
+    """Flatten a design result into a CSV row matching ``RESULT_COLUMNS``."""
+    def s(v):
+        return "N/A" if v is None else v
+    return [
+        r["gene"],
+        s(r["forward"]), s(r["fwd_tm"]), s(r["fwd_gc"]),
+        s(r["reverse"]), s(r["rev_tm"]), s(r["rev_gc"]),
+        s(r["product_size"]),
+        s(r["fwd_hairpin_tm"]), s(r["rev_hairpin_tm"]),
+        s(r["fwd_homodimer_tm"]), s(r["rev_homodimer_tm"]), s(r["heterodimer_tm"]),
+        r.get("specificity", "Not tested"),
+        r["status"],
+    ]
+
+
+def params_summary(params: PrimerParams, extra: str = "") -> str:
+    """One-line parameter banner for the top of a CSV."""
+    d = asdict(params)
+    base = (
+        f"Size {d['min_size']}/{d['opt_size']}/{d['max_size']}, "
+        f"Tm {d['min_tm']}/{d['opt_tm']}/{d['max_tm']}, "
+        f"GC {d['min_gc']}-{d['max_gc']}%, "
+        f"Product {d['product_min']}-{d['product_max']}, "
+        f"GC-clamp {d['gc_clamp']}, mv={d['thermo']['mv_conc']}mM"
+    )
+    return f"Parameters: {base}{(', ' + extra) if extra else ''}"

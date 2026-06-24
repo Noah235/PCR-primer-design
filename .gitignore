@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+_bench_genome.fasta
+*_extracted_sequences.fasta
+benchmark_results.md

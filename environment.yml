@@ -1,0 +1,13 @@
+name: pcr-primer-design
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python>=3.9
+  - pip
+  - pip:
+      - biopython>=1.80
+      - primer3-py>=2.0
+      - pytest>=7.0
+      - flake8
