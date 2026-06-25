@@ -5,9 +5,48 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 
 ---
 
-## ✅ Done in this iteration
+## ✅ Done in this iteration (latest)
 
-### Accuracy — 3′-anchored, mismatch-tolerant specificity (NEW)
+### Accuracy — off-target mismatch reporting (NEW)
+- **Each predicted amplicon now carries its mismatch count.** `in_silico_pcr()`
+  amplicons are `(chrom, start, end, size, mismatches)`; the intended product is
+  0 mismatches and off-targets are ≥1 in mismatch-tolerant mode.
+  `specificity_label()` surfaces the **nearest off-target's mismatch count**, so
+  the CSV `Specificity Check` now distinguishes "non-specific, but the nearest
+  off-target carries 3 mismatches" from a perfect-match off-target — the former
+  is far more likely to be fine at the bench. Regression-guarded
+  (`test_specificity_label_reports_offtarget_mismatches`,
+  `test_in_silico_pcr_amplicon_carries_mismatch_count`).
+
+### Accuracy bug fix — amplicon enumeration early-break (NEW)
+- The amplicon search sorted reverse binding sites by position and `break`-ed on
+  the first product over `max_product`. When the two primers differ in length a
+  later, longer-footprint site could still be in-window, so a valid (often
+  larger) off-target amplicon could be **silently skipped**. The break now uses
+  the *minimum* reverse footprint length as a correct lower bound, so no
+  in-window amplicon is missed while the prune is preserved. Regression-guarded
+  (`test_in_silico_pcr_unequal_primer_lengths_large_product`); benchmarked — no
+  speed regression (specificity path unchanged within noise).
+
+### Ease of use + accuracy — ranked alternate primer pairs (NEW)
+- **Report the top *N* primer pairs per target, not just the single best.**
+  `PrimerParams.num_return` is now honoured end-to-end: `design_primer_candidates()`
+  returns ranked results (rank 0 = best), `design_for_gene()` takes
+  `num_candidates`, and a `Rank` column was added to the CSV. Exposed as
+  `--num-return` (CLI) and *Primers/target* (GUI). If the best pair fails at the
+  bench the user has scored fallbacks without re-running the pipeline.
+  `design_primers_for_sequence()` is kept as a back-compatible single-result
+  wrapper. Regression-guarded (`test_design_primer_candidates_ranked_alternates`,
+  `test_design_primers_for_sequence_is_first_candidate`,
+  `test_design_for_gene_num_candidates_multiplies_rows`) and benchmarked (new
+  "Ranked alternates" section in `benchmark.py`: 3 pairs ≈ 1.5× the time of 1 for
+  3× the output, since it is a single Primer3 call).
+
+---
+
+## ✅ Done in previous iteration
+
+### Accuracy — 3′-anchored, mismatch-tolerant specificity
 - **Off-targets bind with mismatches; exact matching under-reports them.** The
   in-silico PCR check now offers a 3′-anchored, mismatch-tolerant search:
   `in_silico_pcr(..., seed_len=12, max_mismatches=2)`. A binding site counts
@@ -97,10 +136,10 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 ## 🔜 Recommended next (high value)
 
 1. **Gold-standard specificity via BLAST.** The 3′-anchored mismatch search
-   (done — see above) covers the common case. For publication-grade off-target
-   prediction, integrate NCBI Primer-BLAST or a local BLAST/`isPcr` so indels
-   and degenerate sites are handled too. Surface the per-amplicon mismatch count
-   (already computed internally per binding site) in the output.
+   (done) plus per-amplicon mismatch reporting (done — see above) cover the
+   common case. For publication-grade off-target prediction, integrate NCBI
+   Primer-BLAST or a local BLAST/`isPcr` so indels and degenerate sites are
+   handled too.
 2. **Faster specificity at genome scale.** The current search is `str.find`
    over each contig per pair (O(genome × pairs)). Build a k-mer index or use a
    suffix automaton / Aho-Corasick over all primers at once for large genomes
@@ -108,8 +147,10 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 3. **Run design off the main thread.** For large gene sets the Tkinter GUI
    freezes during a run; move the pipeline to a worker thread with a progress
    queue.
-4. **Multiple primer candidates per gene.** `PrimerParams.num_return` is already
-   plumbed through; expose ranked alternates (PRIMER_*_1, _2 …) in the output.
+4. **Rank/score the alternates.** Ranked alternates are now emitted (done — see
+   above); a natural follow-up is a composite quality score per pair (penalising
+   hairpin/dimer Tm near the annealing temp, GC/Tm imbalance) to re-rank or flag
+   risky candidates beyond Primer3's default ordering.
 
 ## 💡 Nice to have
 - Save/load parameter presets (JSON) from the GUI.

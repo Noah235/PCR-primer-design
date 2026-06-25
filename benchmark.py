@@ -127,6 +127,23 @@ def bench_design(templates):
     return t["elapsed"], ok, len(templates)
 
 
+def bench_candidates(templates, num_return):
+    """Design ``num_return`` ranked pairs per template (ease-of-use feature).
+
+    Asking Primer3 for several ranked alternates is a single call with a larger
+    ``PRIMER_NUM_RETURN``; the extra cost is the per-candidate Tm / structure
+    metrics, so this measures the marginal price of the feature.
+    """
+    params = pd.PrimerParams(product_min=100, product_max=600, num_return=num_return)
+    pairs = 0
+    with timer() as t:
+        for i, tpl in enumerate(templates):
+            cands = pd.design_primer_candidates(f"g{i}", tpl, params,
+                                                num_candidates=num_return)
+            pairs += sum(c["status"] == "OK" for c in cands)
+    return t["elapsed"], pairs, len(templates)
+
+
 def bench_placement(genome_seq, genome, n_genes, gene_len=1000, flank=200):
     """Design every placement permutation (6 per gene) over n_genes."""
     rng = random.Random(7)
@@ -151,6 +168,8 @@ def main():
     ap.add_argument("--pairs", type=int, default=20, help="primer pairs for specificity bench")
     ap.add_argument("--genes", type=int, default=30, help="templates for design bench")
     ap.add_argument("--template-bp", type=int, default=1200)
+    ap.add_argument("--num-return", type=int, default=3,
+                    help="ranked alternates per template for the candidates bench")
     ap.add_argument("-o", "--output", default="benchmark_results.md")
     args = ap.parse_args()
 
@@ -166,6 +185,10 @@ def main():
     print(f"Design benchmark: {args.genes} templates ...")
     templates = make_templates(genome_seq, args.genes, args.template_bp)
     design_t, ok, n_t = bench_design(templates)
+
+    print(f"Ranked-candidates benchmark: 1 vs {args.num_return} per template ...")
+    cand1_t, _, _ = bench_candidates(templates, 1)
+    candn_t, candn_pairs, candn_t_n = bench_candidates(templates, args.num_return)
 
     print(f"Placement benchmark: all permutations over {args.genes} genes ...")
     place_t, place_pairs, place_genes = bench_placement(genome_seq, genome, args.genes)
@@ -199,6 +222,18 @@ def main():
         "| Templates | Successful | Total time | Per template |",
         "| ---: | ---: | ---: | ---: |",
         f"| {n_t} | {ok} | {design_t:.3f} s | {design_t / n_t * 1000:.1f} ms |",
+        "",
+        "## Ranked alternates (primers per target)",
+        "",
+        "| Pairs/target | Templates | Pairs returned | Total time | Per template |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+        f"| 1 | {n_t} | {n_t} | {cand1_t:.3f} s | {cand1_t / n_t * 1000:.1f} ms |",
+        f"| {args.num_return} | {candn_t_n} | {candn_pairs} | {candn_t:.3f} s | "
+        f"{candn_t / candn_t_n * 1000:.1f} ms |",
+        "",
+        f"Requesting {args.num_return} ranked pairs is one Primer3 call with a "
+        "larger `PRIMER_NUM_RETURN`; the marginal cost is per-candidate Tm and "
+        "secondary-structure scoring.",
         "",
         "## Placement (all 6 permutations per gene)",
         "",
