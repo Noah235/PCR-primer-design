@@ -404,12 +404,84 @@ def prepare_genome(genome: Dict) -> Dict[str, str]:
     return prepared
 
 
+def _count_mismatches(a: str, b: str, budget: int) -> int:
+    """Hamming distance between two equal-length strings, early-exiting once it
+    exceeds ``budget`` (returns ``budget + 1`` in that case)."""
+    m = 0
+    for x, y in zip(a, b):
+        if x != y:
+            m += 1
+            if m > budget:
+                return m
+    return m
+
+
+def _primer_binding_sites(
+    top: str, primer: str, seed_len: int, max_mm: int
+) -> Tuple[List[Tuple[int, int, int]], List[Tuple[int, int, int]]]:
+    """Find every forward- and reverse-acting binding site of one primer.
+
+    Returns ``(fwd_sites, rev_sites)`` where each site is
+    ``(left_index, primer_len, mismatches)``.
+
+    A primer only extends if its **3′ end** is well matched, so binding is
+    *3′-anchored*: the 3′-most ``seed_len`` bases must match exactly (the seed),
+    and the full footprint may differ from the primer by at most ``max_mm``
+    bases. Seeding on the 3′ end mirrors the biology (5′ mismatches are
+    tolerated, 3′ mismatches abolish extension) and keeps the search fast — the
+    exact seed is located with ``str.find`` and only the few candidate
+    footprints are scored for mismatches.
+
+    With ``seed_len`` falsy or >= the primer length the whole primer must match
+    exactly (``max_mm`` is ignored), reproducing the original exact search.
+    """
+    L = len(primer)
+    rc = str(Seq(primer).reverse_complement())
+    if not seed_len or seed_len >= L:
+        fwd = [(p, L, 0) for p in _find_all(primer, top)]
+        rev = [(p, L, 0) for p in _find_all(rc, top)]
+        return fwd, rev
+
+    n = len(top)
+    fwd_sites: List[Tuple[int, int, int]] = []
+    rev_sites: List[Tuple[int, int, int]] = []
+
+    # Forward-acting: the 3′ seed is the last ``seed_len`` bases of the primer,
+    # sitting at the right end of the footprint.
+    f_seed = primer[L - seed_len:]
+    off = L - seed_len
+    pos = top.find(f_seed)
+    while pos != -1:
+        i = pos - off
+        if i >= 0 and i + L <= n:
+            mm = _count_mismatches(top[i:i + L], primer, max_mm)
+            if mm <= max_mm:
+                fwd_sites.append((i, L, mm))
+        pos = top.find(f_seed, pos + 1)
+
+    # Reverse-acting: the primer's 3′ end maps to the LEFT end of its
+    # reverse-complement on the top strand, so the seed anchors there.
+    r_seed = rc[:seed_len]
+    pos = top.find(r_seed)
+    while pos != -1:
+        if pos + L <= n:
+            mm = _count_mismatches(top[pos:pos + L], rc, max_mm)
+            if mm <= max_mm:
+                rev_sites.append((pos, L, mm))
+        pos = top.find(r_seed, pos + 1)
+
+    return fwd_sites, rev_sites
+
+
 def in_silico_pcr(
     forward_primer: str,
     reverse_primer: str,
     genome: Dict,
     min_product: int = 50,
     max_product: int = 5000,
+    *,
+    seed_len: int = 0,
+    max_mismatches: int = 0,
 ) -> dict:
     """Count predicted amplicons for a primer pair across a loaded genome.
 
@@ -419,8 +491,7 @@ def in_silico_pcr(
 
     Both primers are searched in *both* senses on every contig:
 
-    * forward-acting site = primer sequence found on the top strand (primes
-      rightward),
+    * forward-acting site = primer found on the top strand (primes rightward),
     * reverse-acting site = reverse-complement of the primer found on the top
       strand (primes leftward).
 
@@ -428,15 +499,23 @@ def in_silico_pcr(
     product within ``[min_product, max_product]`` is an amplicon. This catches
     off-targets the original one-orientation search missed.
 
+    **Mismatch tolerance (accuracy).** With the default ``seed_len=0`` binding
+    is exact. Set ``seed_len`` (≈12 is a good default) and ``max_mismatches`` to
+    do a 3′-anchored, mismatch-tolerant search instead: a site counts when its
+    3′-most ``seed_len`` bases match exactly and the whole primer differs by at
+    most ``max_mismatches`` bases. Real primers prime off-targets that carry
+    mismatches in their 5′ half, so exact matching *under*-reports
+    non-specificity — this models the biology (3′ end must match to extend)
+    while keeping 5′ mismatches tolerated.
+
     Returns ``{"count": int, "amplicons": [(chrom, start, end, size), ...]}``.
     """
     fwd = clean_sequence(forward_primer)
     rev = clean_sequence(reverse_primer)
     if len(fwd) < 10 or len(rev) < 10:
         return {"count": -1, "amplicons": [], "error": "Primer too short / invalid"}
-
-    primers = [fwd, rev]
-    rev_comps = {p: str(Seq(p).reverse_complement()) for p in primers}
+    if not seed_len:
+        max_mismatches = 0
 
     amplicons: List[Tuple[str, int, int, int]] = []
     for chrom, rec in genome.items():
@@ -444,22 +523,21 @@ def in_silico_pcr(
         if not top:
             continue
 
-        # forward-acting: (5'-end index, primer length)
-        fwd_sites: List[Tuple[int, int]] = []
-        # reverse-acting: (footprint left index, primer length)
-        rev_sites: List[Tuple[int, int]] = []
-        for p in primers:
-            for pos in _find_all(p, top):
-                fwd_sites.append((pos, len(p)))
-            for pos in _find_all(rev_comps[p], top):
-                rev_sites.append((pos, len(p)))
+        # forward-acting: (5'-end index, primer length, mismatches)
+        fwd_sites: List[Tuple[int, int, int]] = []
+        # reverse-acting: (footprint left index, primer length, mismatches)
+        rev_sites: List[Tuple[int, int, int]] = []
+        for p in (fwd, rev):
+            f, r = _primer_binding_sites(top, p, seed_len, max_mismatches)
+            fwd_sites.extend(f)
+            rev_sites.extend(r)
 
         if not fwd_sites or not rev_sites:
             continue
 
         rev_sites.sort()
-        for f_left, _ in fwd_sites:
-            for r_left, r_len in rev_sites:
+        for f_left, _flen, _fmm in fwd_sites:
+            for r_left, r_len, _rmm in rev_sites:
                 if r_left < f_left:
                     continue
                 product = (r_left + r_len) - f_left

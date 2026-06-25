@@ -107,7 +107,14 @@ def bench_specificity(genome_seq, genome, fasta_path, pairs):
         for fwd, rev in primer_pairs:
             pd.in_silico_pcr(fwd, rev, prepared, 50, 5000)
 
-    return legacy["elapsed"], fixed["elapsed"], len(primer_pairs)
+    # 3'-anchored mismatch-tolerant search over the same preloaded genome.
+    with timer() as mismatch:
+        for fwd, rev in primer_pairs:
+            pd.in_silico_pcr(fwd, rev, prepared, 50, 5000,
+                             seed_len=12, max_mismatches=2)
+
+    return (legacy["elapsed"], fixed["elapsed"], mismatch["elapsed"],
+            len(primer_pairs))
 
 
 def bench_design(templates):
@@ -153,7 +160,8 @@ def main():
     SeqIO.write(genome["chr1"], fasta_path, "fasta")
 
     print(f"Specificity benchmark: {args.pairs} primer pairs ...")
-    legacy_t, fixed_t, n_pairs = bench_specificity(genome_seq, genome, fasta_path, args.pairs)
+    legacy_t, fixed_t, mismatch_t, n_pairs = bench_specificity(
+        genome_seq, genome, fasta_path, args.pairs)
 
     print(f"Design benchmark: {args.genes} templates ...")
     templates = make_templates(genome_seq, args.genes, args.template_bp)
@@ -178,9 +186,13 @@ def main():
         f"{legacy_t:.3f} s | {legacy_t / n_pairs * 1000:.1f} ms |",
         f"| Fixed (preloaded genome, 2 orientations) | {n_pairs} | "
         f"{fixed_t:.3f} s | {fixed_t / n_pairs * 1000:.1f} ms |",
+        f"| 3'-anchored mismatch (seed 12, ≤2 mm) | {n_pairs} | "
+        f"{mismatch_t:.3f} s | {mismatch_t / n_pairs * 1000:.1f} ms |",
         "",
         f"**Speedup: {speedup:.1f}x** (the fixed version also checks both primer "
-        "orientations, which the legacy version missed).",
+        "orientations, which the legacy version missed). The mismatch-tolerant "
+        "search seeds on the exact 3' end with `str.find`, so it stays close to "
+        "the exact path while catching off-targets that carry 5' mismatches.",
         "",
         "## Primer design throughput",
         "",

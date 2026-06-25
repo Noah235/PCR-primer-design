@@ -96,15 +96,23 @@ def run_genome(a):
             if a.specificity and r["status"] == "OK":
                 max_prod = max(params.product_max, (r["product_size"] or 0) + 500)
                 spec = pd.in_silico_pcr(r["forward"], r["reverse"], prepared_genome,
-                                        50, max_prod)
+                                        50, max_prod,
+                                        seed_len=a.seed_len,
+                                        max_mismatches=a.max_mismatches)
                 r["specificity"] = pd.specificity_label(spec)
             else:
                 r["specificity"] = "Not tested"
             n_ok += r["status"] == "OK"
             rows.append(pd.result_to_row(r))
 
+    if a.specificity:
+        spec_desc = (f"specificity=seed{a.seed_len}/mm{a.max_mismatches}"
+                     if a.seed_len else "specificity=exact")
+    else:
+        spec_desc = "specificity=off"
     _write(a.output, pd.params_summary(
-        params, f"placement={placement}, flank={a.flank}, genes={len(gene_list)}"), rows)
+        params,
+        f"placement={placement}, flank={a.flank}, genes={len(gene_list)}, {spec_desc}"), rows)
     logging.info("%d primer pair(s) designed across %d genes -> %s",
                  n_ok, len(gene_list), a.output)
 
@@ -145,6 +153,12 @@ def build_parser():
     g.add_argument("--gff", required=True)
     g.add_argument("--genes", default="", help="comma/line-separated names; empty = all")
     g.add_argument("--specificity", action="store_true", help="run in-silico PCR check")
+    g.add_argument("--seed-len", type=int, default=0,
+                   help="3'-anchor seed length for mismatch-tolerant specificity "
+                        "(0 = exact match; ~12 is a sensible value)")
+    g.add_argument("--max-mismatches", type=int, default=0,
+                   help="max mismatches in the primer 5' of the seed "
+                        "(only used when --seed-len > 0)")
     g.add_argument("--flank", type=int, default=200,
                    help="flank size (bp) extracted up/downstream of each gene")
     g.add_argument("--placement", default="internal",

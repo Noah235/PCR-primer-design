@@ -7,6 +7,26 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 
 ## ✅ Done in this iteration
 
+### Accuracy — 3′-anchored, mismatch-tolerant specificity (NEW)
+- **Off-targets bind with mismatches; exact matching under-reports them.** The
+  in-silico PCR check now offers a 3′-anchored, mismatch-tolerant search:
+  `in_silico_pcr(..., seed_len=12, max_mismatches=2)`. A binding site counts
+  when its **3′-most `seed_len` bases match exactly** (the seed) and the whole
+  footprint differs from the primer by at most `max_mismatches` bases. This
+  mirrors the biology — a primer extends only when its 3′ end is matched, while
+  5′ mismatches are tolerated — so it surfaces off-targets the exact search
+  silently missed. `seed_len=0` (default) keeps the exact behaviour bit-for-bit.
+  - Implementation seeds on the exact 3′ k-mer with `str.find` and only scores
+    the few candidate footprints, so it stays within **~9 % of the exact path**
+    (14.4 vs 13.2 ms/pair at *E. coli* scale) and still ~2× faster than the
+    original reload-per-pair code. See `benchmark.py`.
+  - Exposed in the CLI (`--seed-len` / `--max-mismatches`) and GUI (*3′ seed* /
+    *Max mismatches* fields), and recorded in the CSV parameter banner.
+  - Regression-guarded: `test_in_silico_pcr_mismatch_offtarget_detected`
+    (5′-mismatched off-target found), `test_in_silico_pcr_3prime_mismatch_not_extended`
+    (3′-seed mismatch correctly rejected), `test_in_silico_pcr_seed_len_zero_is_exact`
+    (exact-mode equivalence).
+
 ### Primer placement control
 - **Choose where each primer lands relative to the gene.** Via Primer3's
   `SEQUENCE_PRIMER_PAIR_OK_REGION_LIST`, the forward and reverse primers can be
@@ -76,13 +96,11 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 
 ## 🔜 Recommended next (high value)
 
-1. **Mismatch-tolerant / 3′-anchored specificity.** Real off-targets bind with
-   mismatches. Exact matching under-reports non-specificity. Options, in order
-   of effort:
-   - Seed on the 3′-most ~12 nt (most important for extension), then score
-     mismatches in the remainder.
-   - Integrate NCBI Primer-BLAST or a local BLAST/`isPcr` for gold-standard
-     specificity.
+1. **Gold-standard specificity via BLAST.** The 3′-anchored mismatch search
+   (done — see above) covers the common case. For publication-grade off-target
+   prediction, integrate NCBI Primer-BLAST or a local BLAST/`isPcr` so indels
+   and degenerate sites are handled too. Surface the per-amplicon mismatch count
+   (already computed internally per binding site) in the output.
 2. **Faster specificity at genome scale.** The current search is `str.find`
    over each contig per pair (O(genome × pairs)). Build a k-mer index or use a
    suffix automaton / Aho-Corasick over all primers at once for large genomes

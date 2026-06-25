@@ -149,6 +149,57 @@ def test_in_silico_pcr_product_window():
     assert res["count"] == 0
 
 
+def test_in_silico_pcr_mismatch_offtarget_detected():
+    """A 5'-mismatched off-target (3' seed intact) is invisible to exact search
+    but must be caught by the 3'-anchored mismatch-tolerant search."""
+    fwd = "AAAGGGCTACGTTGCAATCG"
+    rev = "CCCTTTGCAGTACTTAGGAC"
+    rev_rc = str(Seq(rev).reverse_complement())
+    spacer = "A" * 100
+    # Off-target forward site: two 5' mismatches, identical 3' seed.
+    fwd_5mm = "CC" + fwd[2:]
+    primary = fwd + spacer + rev_rc
+    offtarget = fwd_5mm + spacer + rev_rc
+    template = "GG" + primary + ("T" * 300) + offtarget + "GG"
+    genome = _genome_from_str(template)
+
+    exact = pd.in_silico_pcr(fwd, rev, genome, min_product=50, max_product=200)
+    assert exact["count"] == 1  # only the perfect site
+
+    mm = pd.in_silico_pcr(fwd, rev, genome, min_product=50, max_product=200,
+                          seed_len=12, max_mismatches=2)
+    assert mm["count"] == 2  # perfect site + 5'-mismatched off-target
+
+
+def test_in_silico_pcr_3prime_mismatch_not_extended():
+    """A mismatch inside the 3' seed abolishes priming, so the off-target must
+    NOT be counted even though it is only one base off overall."""
+    fwd = "AAAGGGCTACGTTGCAATCG"
+    rev = "CCCTTTGCAGTACTTAGGAC"
+    rev_rc = str(Seq(rev).reverse_complement())
+    spacer = "A" * 100
+    # Off-target with a single mismatch at the 3'-most base (breaks the seed).
+    fwd_3mm = fwd[:-1] + ("A" if fwd[-1] != "A" else "C")
+    template = ("GG" + fwd + spacer + rev_rc
+                + ("T" * 300) + fwd_3mm + spacer + rev_rc + "GG")
+    mm = pd.in_silico_pcr(fwd, rev, _genome_from_str(template),
+                          min_product=50, max_product=200,
+                          seed_len=12, max_mismatches=3)
+    assert mm["count"] == 1  # 3'-broken site rejected despite mismatch budget
+
+
+def test_in_silico_pcr_seed_len_zero_is_exact():
+    """seed_len=0 must reproduce exact-match behaviour bit-for-bit."""
+    fwd = "AAAGGGCTACGTTGCAATCG"
+    rev = "CCCTTTGCAGTACTTAGGAC"
+    rev_rc = str(Seq(rev).reverse_complement())
+    template = "GG" + fwd + ("A" * 100) + rev_rc + "GG"
+    genome = _genome_from_str(template)
+    a = pd.in_silico_pcr(fwd, rev, genome, 50, 500)
+    b = pd.in_silico_pcr(fwd, rev, genome, 50, 500, seed_len=0, max_mismatches=5)
+    assert a == b
+
+
 def test_specificity_label():
     assert pd.specificity_label({"count": 0}) == "No amplicons found"
     assert pd.specificity_label({"count": 1}).startswith("Specific")

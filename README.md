@@ -15,6 +15,11 @@ GUI** or a **headless CLI**, with all logic in an importable, tested core module
 - **Accurate, two-orientation in-silico PCR** specificity check that counts every
   predicted amplicon across the genome (catches off-targets the naive
   single-orientation search misses).
+- **3′-anchored, mismatch-tolerant specificity** (optional) — models the biology
+  that a primer only extends when its 3′ end matches: the 3′ seed must match
+  exactly while a budget of 5′ mismatches is allowed, surfacing off-targets that
+  exact matching silently misses. Enabled with `--seed-len`/`--max-mismatches`
+  (CLI) or the *3′ seed* / *Max mismatches* fields (GUI).
 - **Secondary-structure reporting** per primer: hairpin Tm, self-dimer Tm, and
   primer-pair hetero-dimer Tm — so you can spot primers likely to fail.
 - **Internally consistent Tm** (reported under the same salt conditions used for
@@ -73,6 +78,10 @@ python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \
 python primer_cli.py genome ... --placement all
 python primer_cli.py genome ... --placement custom --fwd-region upstream --rev-region internal
 
+# Mismatch-tolerant specificity: 12 nt exact 3' seed, up to 2 mismatches in the 5' tail
+python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \
+    --specificity --seed-len 12 --max-mismatches 2 -o primers.csv
+
 python primer_cli.py genome --help    # full parameter list
 ```
 
@@ -87,6 +96,10 @@ result = pd.design_primers_for_sequence("myGene", template_seq, params)
 genome = pd.prepare_genome(pd.load_genome("genome.fasta"))
 spec = pd.in_silico_pcr(result["forward"], result["reverse"], genome)
 print(pd.specificity_label(spec))
+
+# Mismatch-tolerant: catch off-targets with 5' mismatches (3' seed must match)
+spec = pd.in_silico_pcr(result["forward"], result["reverse"], genome,
+                        seed_len=12, max_mismatches=2)
 ```
 
 ---
@@ -131,10 +144,11 @@ flake8 . --select=E9,F63,F7,F82    # CI-blocking lint
 
 ## Notes & limitations
 
-- The in-silico specificity check uses **exact** matching (no mismatches). It is
-  fast and good for screening, but experimental validation is still recommended.
-  See `IMPROVEMENTS.md` for the plan to add mismatch-tolerant / BLAST-based
-  specificity.
+- The in-silico specificity check defaults to **exact** matching (fast screening).
+  For higher accuracy enable the **3′-anchored mismatch-tolerant** mode
+  (`--seed-len 12 --max-mismatches 2`), which finds off-targets carrying 5′
+  mismatches. Experimental validation is still recommended; for gold-standard
+  results integrate Primer-BLAST / local BLAST (see `IMPROVEMENTS.md`).
 - Specificity scales as O(genome × primer pairs); for whole-genome panels a
   k-mer index is the recommended next step.
 
