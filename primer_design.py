@@ -508,7 +508,11 @@ def in_silico_pcr(
     non-specificity — this models the biology (3′ end must match to extend)
     while keeping 5′ mismatches tolerated.
 
-    Returns ``{"count": int, "amplicons": [(chrom, start, end, size), ...]}``.
+    Returns ``{"count": int, "amplicons": [(chrom, start, end, size,
+    mismatches), ...], "max_mismatches_observed": int}``. ``mismatches`` is the
+    combined number of mismatches of the two primers for that amplicon (always
+    ``0`` in exact mode), so off-targets that bind imperfectly can be told apart
+    from a perfect on-target hit.
     """
     fwd = clean_sequence(forward_primer)
     rev = clean_sequence(reverse_primer)
@@ -536,8 +540,8 @@ def in_silico_pcr(
             continue
 
         rev_sites.sort()
-        for f_left, _flen, _fmm in fwd_sites:
-            for r_left, r_len, _rmm in rev_sites:
+        for f_left, _flen, fmm in fwd_sites:
+            for r_left, r_len, rmm in rev_sites:
                 if r_left < f_left:
                     continue
                 product = (r_left + r_len) - f_left
@@ -545,21 +549,77 @@ def in_silico_pcr(
                     continue
                 if product > max_product:
                     break  # rev_sites sorted; further ones only larger
-                amplicons.append((chrom, f_left, r_left + r_len, product))
+                amplicons.append((chrom, f_left, r_left + r_len, product, fmm + rmm))
 
-    return {"count": len(amplicons), "amplicons": amplicons}
+    max_mm = max((a[4] for a in amplicons), default=0)
+    return {
+        "count": len(amplicons),
+        "amplicons": amplicons,
+        "max_mismatches_observed": max_mm,
+    }
 
 
 def specificity_label(result: dict) -> str:
-    """Human-readable summary of :func:`in_silico_pcr` output."""
+    """Human-readable summary of :func:`in_silico_pcr` output.
+
+    When the mismatch-tolerant search found imperfectly-binding sites the worst
+    mismatch count is appended, e.g. ``"Non-specific (3 amplicons, up to 2
+    mismatches)"`` — useful to gauge how plausible an off-target really is.
+    """
     count = result.get("count", -1)
     if count < 0:
         return result.get("error", "Invalid")
     if count == 0:
         return "No amplicons found"
+    mm = result.get("max_mismatches_observed", 0)
+    note = f", up to {mm} mismatch{'es' if mm != 1 else ''}" if mm else ""
     if count == 1:
-        return "Specific (1 amplicon)"
-    return f"Non-specific ({count} amplicons)"
+        return f"Specific (1 amplicon{note})"
+    return f"Non-specific ({count} amplicons{note})"
+
+
+# --------------------------------------------------------------------------- #
+# Quality warnings
+# --------------------------------------------------------------------------- #
+# Heuristic thresholds for flagging a primer pair that is likely to amplify
+# poorly. Secondary-structure Tm values near the annealing temperature mean the
+# structure competes with template binding; a large Tm difference between the
+# two primers means one anneals far better than the other at a single cycling
+# temperature. These are screening defaults, not hard limits.
+WARN_MAX_TM_DIFF = 5.0        # °C; mismatched pair Tm hurts co-amplification
+WARN_HAIRPIN_TM = 45.0        # °C; hairpin stable near typical annealing temps
+WARN_DIMER_TM = 45.0          # °C; self-/hetero-dimer stable near annealing
+
+
+def primer_warnings(
+    result: dict,
+    *,
+    max_tm_diff: float = WARN_MAX_TM_DIFF,
+    hairpin_tm: float = WARN_HAIRPIN_TM,
+    dimer_tm: float = WARN_DIMER_TM,
+) -> List[str]:
+    """Return human-readable risk warnings for a design ``result`` (maybe empty).
+
+    Surfaces the secondary-structure / Tm-balance problems that are otherwise
+    buried in the numeric columns, so a user can see *at a glance* why a primer
+    pair might fail rather than having to interpret six Tm numbers themselves.
+    """
+    warns: List[str] = []
+    ft, rt = result.get("fwd_tm"), result.get("rev_tm")
+    if ft is not None and rt is not None and abs(ft - rt) > max_tm_diff:
+        warns.append(f"ΔTm {abs(ft - rt):.1f}°C")
+    for label, key in (("fwd hairpin", "fwd_hairpin_tm"),
+                       ("rev hairpin", "rev_hairpin_tm")):
+        v = result.get(key)
+        if v is not None and v > hairpin_tm:
+            warns.append(f"high {label} ({v:.0f}°C)")
+    for label, key in (("fwd self-dimer", "fwd_homodimer_tm"),
+                       ("rev self-dimer", "rev_homodimer_tm"),
+                       ("hetero-dimer", "heterodimer_tm")):
+        v = result.get(key)
+        if v is not None and v > dimer_tm:
+            warns.append(f"high {label} ({v:.0f}°C)")
+    return warns
 
 
 # --------------------------------------------------------------------------- #
@@ -593,11 +653,13 @@ def _new_result(seq_id: str, placement: str) -> dict:
         "rev_tm": None,
         "rev_gc": None,
         "product_size": None,
+        "tm_diff": None,
         "fwd_hairpin_tm": None,
         "rev_hairpin_tm": None,
         "fwd_homodimer_tm": None,
         "rev_homodimer_tm": None,
         "heterodimer_tm": None,
+        "warnings": "",
         "status": "No suitable primers",
     }
 
@@ -667,15 +729,18 @@ def design_primers_for_sequence(
     thermo = params.thermo
     fwd_struct = analyze_oligo(fwd, thermo)
     rev_struct = analyze_oligo(rev, thermo)
+    fwd_tm, rev_tm = calc_tm(fwd, thermo), calc_tm(rev, thermo)
     result.update(
         {
             "forward": fwd,
             "reverse": rev,
-            "fwd_tm": calc_tm(fwd, thermo),
+            "fwd_tm": fwd_tm,
             "fwd_gc": calc_gc(fwd),
-            "rev_tm": calc_tm(rev, thermo),
+            "rev_tm": rev_tm,
             "rev_gc": calc_gc(rev),
             "product_size": primers.get("PRIMER_PAIR_0_PRODUCT_SIZE"),
+            "tm_diff": (round(abs(fwd_tm - rev_tm), 2)
+                        if fwd_tm is not None and rev_tm is not None else None),
             "fwd_hairpin_tm": fwd_struct["hairpin_tm"],
             "rev_hairpin_tm": rev_struct["hairpin_tm"],
             "fwd_homodimer_tm": fwd_struct["homodimer_tm"],
@@ -684,6 +749,7 @@ def design_primers_for_sequence(
             "status": "OK",
         }
     )
+    result["warnings"] = "; ".join(primer_warnings(result))
     return result
 
 
@@ -795,10 +861,10 @@ RESULT_COLUMNS = [
     "Gene Name", "Placement",
     "Forward Primer", "Fwd Tm", "Fwd GC%",
     "Reverse Primer", "Rev Tm", "Rev GC%",
-    "Product Length",
+    "Product Length", "Tm Diff",
     "Fwd Hairpin Tm", "Rev Hairpin Tm",
     "Fwd SelfDimer Tm", "Rev SelfDimer Tm", "Hetero-dimer Tm",
-    "Specificity Check", "Status",
+    "Specificity Check", "Warnings", "Status",
 ]
 
 
@@ -810,10 +876,11 @@ def result_to_row(r: dict) -> list:
         r["gene"], r.get("placement", "internal"),
         s(r["forward"]), s(r["fwd_tm"]), s(r["fwd_gc"]),
         s(r["reverse"]), s(r["rev_tm"]), s(r["rev_gc"]),
-        s(r["product_size"]),
+        s(r["product_size"]), s(r.get("tm_diff")),
         s(r["fwd_hairpin_tm"]), s(r["rev_hairpin_tm"]),
         s(r["fwd_homodimer_tm"]), s(r["rev_homodimer_tm"]), s(r["heterodimer_tm"]),
         r.get("specificity", "Not tested"),
+        r.get("warnings", ""),
         r["status"],
     ]
 

@@ -22,6 +22,14 @@ GUI** or a **headless CLI**, with all logic in an importable, tested core module
   (CLI) or the *3′ seed* / *Max mismatches* fields (GUI).
 - **Secondary-structure reporting** per primer: hairpin Tm, self-dimer Tm, and
   primer-pair hetero-dimer Tm — so you can spot primers likely to fail.
+- **At-a-glance quality warnings** — a `Warnings` column flags the actual
+  problems (large Tm difference between the two primers, stable hairpins,
+  self-/hetero-dimers) instead of making you interpret six Tm numbers, plus an
+  explicit `Tm Diff` column for pair Tm balance.
+- **Per-amplicon mismatch counts** — the specificity check reports how many
+  mismatches each predicted off-target carries (e.g. *"Non-specific (3
+  amplicons, up to 2 mismatches)"*), so a perfect on-target is distinguishable
+  from a weak, mismatched off-target.
 - **Internally consistent Tm** (reported under the same salt conditions used for
   design).
 - **Primer placement control** — choose where each primer lands relative to the
@@ -107,8 +115,13 @@ spec = pd.in_silico_pcr(result["forward"], result["reverse"], genome,
 ## Output (CSV columns)
 
 Gene name · Placement · Forward/Reverse primer · Tm · GC% · Product length ·
-Hairpin Tm (F/R) · Self-dimer Tm (F/R) · Hetero-dimer Tm ·
-Specificity check · Status.
+Tm Diff · Hairpin Tm (F/R) · Self-dimer Tm (F/R) · Hetero-dimer Tm ·
+Specificity check · Warnings · Status.
+
+The **Warnings** column is empty for a clean pair; otherwise it summarises the
+risks (e.g. `ΔTm 6.2°C; high fwd hairpin (52°C)`). The **Specificity check**
+also reports the worst mismatch count of any predicted amplicon when the
+mismatch-tolerant search is used.
 
 The **Placement** column records where the pair was designed (e.g.
 `internal->internal`, `upstream->downstream`). With `--placement all` you get one
