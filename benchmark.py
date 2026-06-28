@@ -127,6 +127,17 @@ def bench_design(templates):
     return t["elapsed"], ok, len(templates)
 
 
+def bench_candidates(templates, num_return=5):
+    """Throughput of ranked multi-candidate design (num_return alternates)."""
+    params = pd.PrimerParams(product_min=100, product_max=600, num_return=num_return)
+    total_cands = 0
+    with timer() as t:
+        for i, tpl in enumerate(templates):
+            cands = pd.design_primer_candidates(f"g{i}", tpl, params)
+            total_cands += sum(c["status"] == "OK" for c in cands)
+    return t["elapsed"], total_cands, len(templates), num_return
+
+
 def bench_placement(genome_seq, genome, n_genes, gene_len=1000, flank=200):
     """Design every placement permutation (6 per gene) over n_genes."""
     rng = random.Random(7)
@@ -151,6 +162,8 @@ def main():
     ap.add_argument("--pairs", type=int, default=20, help="primer pairs for specificity bench")
     ap.add_argument("--genes", type=int, default=30, help="templates for design bench")
     ap.add_argument("--template-bp", type=int, default=1200)
+    ap.add_argument("--num-return", type=int, default=5,
+                    help="ranked candidates per template for the candidate benchmark")
     ap.add_argument("-o", "--output", default="benchmark_results.md")
     args = ap.parse_args()
 
@@ -166,6 +179,9 @@ def main():
     print(f"Design benchmark: {args.genes} templates ...")
     templates = make_templates(genome_seq, args.genes, args.template_bp)
     design_t, ok, n_t = bench_design(templates)
+
+    print(f"Candidate benchmark: {args.num_return} alternates over {args.genes} templates ...")
+    cand_t, cand_total, cand_n, cand_k = bench_candidates(templates, args.num_return)
 
     print(f"Placement benchmark: all permutations over {args.genes} genes ...")
     place_t, place_pairs, place_genes = bench_placement(genome_seq, genome, args.genes)
@@ -199,6 +215,17 @@ def main():
         "| Templates | Successful | Total time | Per template |",
         "| ---: | ---: | ---: | ---: |",
         f"| {n_t} | {ok} | {design_t:.3f} s | {design_t / n_t * 1000:.1f} ms |",
+        "",
+        f"## Ranked candidates ({cand_k} alternates per template)",
+        "",
+        "| Templates | Pairs returned | Total time | Per template |",
+        "| ---: | ---: | ---: | ---: |",
+        f"| {cand_n} | {cand_total} | {cand_t:.3f} s | {cand_t / cand_n * 1000:.1f} ms |",
+        "",
+        f"Asking Primer3 for {cand_k} ranked pairs instead of 1 costs little extra "
+        "(Primer3 already enumerates and scores candidates internally); the added "
+        "per-template cost is the secondary-structure/Tm analysis of each returned "
+        "alternate.",
         "",
         "## Placement (all 6 permutations per gene)",
         "",

@@ -7,6 +7,34 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 
 ## ✅ Done in this iteration
 
+### Accuracy + ease of use — ranked alternate candidates (NEW)
+- **`num_return` is now a real feature, not dead config.** It was plumbed into
+  `PrimerParams` and the Primer3 global args but the design code only ever read
+  candidate index `0`, so requesting more pairs did nothing. New
+  `design_primer_candidates()` returns up to *N* Primer3-ranked pairs (rank 0 =
+  best), each fully analysed (Tm/GC, secondary structure, warnings, and — in the
+  CLI/GUI — its own specificity check). A new **`Rank`** column (1-based) labels
+  the primary pair vs alternates.
+  - **Why it matters:** when the top pair carries a warning (ΔTm, hairpin,
+    dimer) or a non-specific hit, the user can pick a cleaner alternate from the
+    same run instead of re-running with tweaked parameters — better final
+    primers (accuracy) with less iteration (ease of use).
+  - Back-compatible: `design_primers_for_sequence()` is now a thin wrapper that
+    returns the rank-0 pair, so every existing caller is unchanged. Default
+    `num_return=1` produces exactly one row, identical to before (plus the new
+    `Rank` column = 1).
+  - Exposed as `--num-return` (CLI, both `genome` and `cds` modes) and a
+    *Candidates* field (GUI); recorded in the CSV parameter banner when > 1.
+  - Regression-guarded: `test_design_candidates_returns_multiple_ranked`,
+    `test_design_candidates_default_is_single`,
+    `test_design_primers_for_sequence_returns_best`,
+    `test_design_candidates_failure_returns_single_row`,
+    `test_design_for_gene_emits_candidate_rows`.
+  - Benchmarked (new *Ranked candidates* section in `benchmark.py`): 5 ranked
+    pairs cost ~14.5 ms/template vs ~7.0 ms for 1 — Primer3 already enumerates
+    candidates internally, so the extra cost is just per-alternate
+    structure/Tm analysis; the existing design/specificity paths are unchanged.
+
 ### Ease of use — actionable quality warnings (NEW)
 - **A `Warnings` column tells you *why* a pair might fail, in words.** Previously
   the output carried six secondary-structure / Tm numbers and left the user to
@@ -139,14 +167,18 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 3. **Run design off the main thread.** For large gene sets the Tkinter GUI
    freezes during a run; move the pipeline to a worker thread with a progress
    queue.
-4. **Multiple primer candidates per gene.** `PrimerParams.num_return` is already
-   plumbed through; expose ranked alternates (PRIMER_*_1, _2 …) in the output.
+4. **Auto-pick the cleanest ranked candidate.** Ranked alternates now exist
+   (done — see above). Next: let a warning/non-specific flag *demote* a
+   candidate so the row reported as "Rank 1" is the cleanest pair, not merely
+   Primer3's score-best one — e.g. re-sort the returned candidates by
+   (specificity OK, warning count, Primer3 rank). Ties into the warning
+   thresholds below.
 
 ## 💡 Nice to have
 - **Expose warning thresholds** (`WARN_MAX_TM_DIFF`, `WARN_HAIRPIN_TM`,
   `WARN_DIMER_TM`) as CLI flags / GUI fields so users can tune the sensitivity
   of the `Warnings` column to their assay, and optionally let a warning demote a
-  candidate so a cleaner alternate is chosen (ties into ranked alternates below).
+  candidate so a cleaner alternate is chosen (ties into auto-pick above).
 - Save/load parameter presets (JSON) from the GUI.
 - Allow primers to be placed in flanking regions (knockout-verification
   primers), not just inside the gene; the flank size is already extracted.

@@ -362,6 +362,64 @@ def test_result_row_matches_columns():
 
 
 # --------------------------------------------------------------------------- #
+# Ranked alternate candidates (num_return)
+# --------------------------------------------------------------------------- #
+def test_design_candidates_returns_multiple_ranked():
+    """Requesting N candidates returns up to N distinct, rank-ordered pairs."""
+    template = _random_seq(800, seed=42)
+    params = pd.PrimerParams(product_min=100, product_max=400, num_return=3)
+    cands = pd.design_primer_candidates("g", template, params)
+    assert 2 <= len(cands) <= 3              # this template yields several
+    assert all(c["status"] == "OK" for c in cands)
+    # Ranks are 0-based, contiguous and ordered.
+    assert [c["rank"] for c in cands] == list(range(len(cands)))
+    # The alternates are genuinely different primer pairs, not duplicates.
+    pairs = {(c["forward"], c["reverse"]) for c in cands}
+    assert len(pairs) == len(cands)
+    # Rank in the output row is 1-based for human readers.
+    assert pd.result_to_row(cands[0])[2] == 1
+    assert pd.result_to_row(cands[1])[2] == 2
+
+
+def test_design_candidates_default_is_single():
+    """Default params (num_return=1) yield exactly one rank-0 candidate."""
+    template = _random_seq(800, seed=42)
+    cands = pd.design_primer_candidates("g", template,
+                                        pd.PrimerParams(product_min=100, product_max=400))
+    assert len(cands) == 1 and cands[0]["rank"] == 0
+
+
+def test_design_primers_for_sequence_returns_best():
+    """The single-pair wrapper returns the rank-0 candidate even when
+    num_return > 1, so existing callers are unaffected."""
+    template = _random_seq(800, seed=42)
+    params = pd.PrimerParams(product_min=100, product_max=400, num_return=5)
+    best = pd.design_primers_for_sequence("g", template, params)
+    cands = pd.design_primer_candidates("g", template, params)
+    assert best["rank"] == 0
+    assert (best["forward"], best["reverse"]) == (cands[0]["forward"], cands[0]["reverse"])
+
+
+def test_design_candidates_failure_returns_single_row():
+    """A template too short to design still returns exactly one explanatory row."""
+    params = pd.PrimerParams(num_return=4)
+    cands = pd.design_primer_candidates("x", "ATGC", params)
+    assert len(cands) == 1
+    assert "too short" in cands[0]["status"].lower()
+
+
+def test_design_for_gene_emits_candidate_rows():
+    """num_return > 1 produces multiple rows per placement for one gene."""
+    genome, gene = _placement_genome()
+    params = pd.PrimerParams(product_min=100, product_max=500, num_return=3)
+    results = pd.design_for_gene(genome, gene, params, flank_size=150)
+    ok = [r for r in results if r["status"] == "OK"]
+    assert len(ok) >= 2                       # internal placement, several alternates
+    assert all(r["placement"] == "internal->internal" for r in ok)
+    assert {r["rank"] for r in ok} == set(range(len(ok)))
+
+
+# --------------------------------------------------------------------------- #
 # Quality warnings (Tm balance + secondary structure)
 # --------------------------------------------------------------------------- #
 def test_design_reports_tm_diff():

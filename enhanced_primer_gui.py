@@ -96,11 +96,11 @@ def _run_cds(params, output_csv, cds_path, target_names, log):
         for i, (name, info) in enumerate(filtered.items()):
             if i % 10 == 0:
                 log(f"Processing CDS {i + 1}/{len(filtered)}...")
-            r = pd.design_primers_for_sequence(name, info["sequence"], params)
-            r["specificity"] = "N/A (CDS mode)"
-            if r["status"] == "OK":
-                n_ok += 1
-            writer.writerow(pd.result_to_row(r))
+            for r in pd.design_primer_candidates(name, info["sequence"], params):
+                r["specificity"] = "N/A (CDS mode)"
+                if r["status"] == "OK":
+                    n_ok += 1
+                writer.writerow(pd.result_to_row(r))
 
     log(f"Done. {n_ok}/{len(filtered)} CDS had suitable primers")
     log(f"Output: {os.path.abspath(output_csv)}")
@@ -191,6 +191,7 @@ def main():  # pragma: no cover - interactive GUI
     min_prod_e = add_entry("Min Product", 2, 4, defaults.product_min)
     max_prod_e = add_entry("Max Product", 3, 0, defaults.product_max)
     gc_clamp_e = add_entry("GC Clamp", 3, 2, defaults.gc_clamp)
+    num_return_e = add_entry("Candidates", 6, 0, defaults.num_return)
     flank_label = tk.Label(param_frame, text="Flank (bp)")
     flank_label.grid(row=3, column=4)
     flank_e = tk.Entry(param_frame, width=6)
@@ -251,7 +252,7 @@ def main():  # pragma: no cover - interactive GUI
             max_tm=float(max_tm_e.get()),
             min_gc=float(min_gc_e.get()), max_gc=float(max_gc_e.get()),
             product_min=int(min_prod_e.get()), product_max=int(max_prod_e.get()),
-            gc_clamp=int(gc_clamp_e.get()),
+            gc_clamp=int(gc_clamp_e.get()), num_return=int(num_return_e.get() or 1),
         )
         problems = params.validate()
         if problems:
