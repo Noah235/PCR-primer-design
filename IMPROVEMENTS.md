@@ -7,7 +7,36 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 
 ## ✅ Done in this iteration
 
-### Accuracy — 3′-anchored, mismatch-tolerant specificity (NEW)
+### Ease of use — actionable quality warnings (NEW)
+- **A `Warnings` column tells you *why* a pair might fail, in words.** Previously
+  the output carried six secondary-structure / Tm numbers and left the user to
+  interpret them. `primer_warnings()` now distills them into a short, readable
+  flag string (e.g. `ΔTm 6.2°C; high fwd hairpin (52°C); high hetero-dimer
+  (48°C)`) using screening thresholds (`WARN_MAX_TM_DIFF`, `WARN_HAIRPIN_TM`,
+  `WARN_DIMER_TM`). A clean pair has an empty cell. Flows automatically through
+  both the CLI and GUI (it is part of `result_to_row`).
+- **Explicit `Tm Diff` column.** The Tm difference between the forward and
+  reverse primer is reported directly (`tm_diff`); a large value means one primer
+  out-competes the other at a single annealing temperature — a common, easily
+  missed cause of weak/failed amplification.
+- Regression-guarded: `test_primer_warnings_flags_problems`,
+  `test_primer_warnings_clean_pair_is_empty`,
+  `test_primer_warnings_tolerates_missing_values`, `test_design_reports_tm_diff`.
+
+### Accuracy — per-amplicon mismatch counts in specificity output (NEW)
+- **Off-targets now carry their mismatch count.** `in_silico_pcr()` records the
+  combined primer mismatches of every predicted amplicon (the 5th element of
+  each `amplicons` tuple) and the worst case (`max_mismatches_observed`).
+  `specificity_label()` surfaces it — *"Non-specific (3 amplicons, up to 2
+  mismatches)"* — so a perfect on-target is distinguishable from a weak,
+  imperfectly-binding off-target. This was the top "recommended next" item
+  (gold-standard specificity sub-task). Exact mode still reports `0`.
+  Regression-guarded: `test_amplicon_carries_mismatch_count`,
+  `test_specificity_label_reports_mismatches`.
+- Benchmarked: no measurable change to the specificity path (mismatch counts are
+  already computed per binding site; only the worst case is now retained).
+
+### Accuracy — 3′-anchored, mismatch-tolerant specificity
 - **Off-targets bind with mismatches; exact matching under-reports them.** The
   in-silico PCR check now offers a 3′-anchored, mismatch-tolerant search:
   `in_silico_pcr(..., seed_len=12, max_mismatches=2)`. A binding site counts
@@ -97,10 +126,12 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 ## 🔜 Recommended next (high value)
 
 1. **Gold-standard specificity via BLAST.** The 3′-anchored mismatch search
-   (done — see above) covers the common case. For publication-grade off-target
-   prediction, integrate NCBI Primer-BLAST or a local BLAST/`isPcr` so indels
-   and degenerate sites are handled too. Surface the per-amplicon mismatch count
-   (already computed internally per binding site) in the output.
+   (done) plus per-amplicon mismatch reporting (done — see above) cover the
+   common case. For publication-grade off-target prediction, integrate NCBI
+   Primer-BLAST or a local BLAST/`isPcr` so **indels** and **degenerate/IUPAC
+   sites** are handled too (the current search is substitution-only). Weighting
+   3′-proximal mismatches more heavily than 5′ ones would further improve the
+   ranking of plausible off-targets.
 2. **Faster specificity at genome scale.** The current search is `str.find`
    over each contig per pair (O(genome × pairs)). Build a k-mer index or use a
    suffix automaton / Aho-Corasick over all primers at once for large genomes
@@ -112,6 +143,10 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
    plumbed through; expose ranked alternates (PRIMER_*_1, _2 …) in the output.
 
 ## 💡 Nice to have
+- **Expose warning thresholds** (`WARN_MAX_TM_DIFF`, `WARN_HAIRPIN_TM`,
+  `WARN_DIMER_TM`) as CLI flags / GUI fields so users can tune the sensitivity
+  of the `Warnings` column to their assay, and optionally let a warning demote a
+  candidate so a cleaner alternate is chosen (ties into ranked alternates below).
 - Save/load parameter presets (JSON) from the GUI.
 - Allow primers to be placed in flanking regions (knockout-verification
   primers), not just inside the gene; the flank size is already extracted.

@@ -106,8 +106,10 @@ def test_in_silico_pcr_single_amplicon():
     res = pd.in_silico_pcr(fwd, rev, _genome_from_str(template),
                            min_product=50, max_product=500)
     assert res["count"] == 1
-    chrom, start, end, size = res["amplicons"][0]
+    chrom, start, end, size, mm = res["amplicons"][0]
     assert size == len(fwd) + len(spacer) + len(rev)
+    assert mm == 0                          # exact mode -> no mismatches
+    assert res["max_mismatches_observed"] == 0
 
 
 def test_in_silico_pcr_detects_second_site():
@@ -205,6 +207,34 @@ def test_specificity_label():
     assert pd.specificity_label({"count": 1}).startswith("Specific")
     assert pd.specificity_label({"count": 3}).startswith("Non-specific")
     assert pd.specificity_label({"count": -1, "error": "bad"}) == "bad"
+
+
+def test_specificity_label_reports_mismatches():
+    # When the mismatch-tolerant search saw imperfect sites, say so.
+    label = pd.specificity_label({"count": 2, "max_mismatches_observed": 2})
+    assert "up to 2 mismatches" in label
+    one = pd.specificity_label({"count": 1, "max_mismatches_observed": 1})
+    assert "up to 1 mismatch" in one and "mismatches" not in one
+    # No mismatch info -> unchanged wording.
+    assert pd.specificity_label({"count": 1, "max_mismatches_observed": 0}) \
+        == "Specific (1 amplicon)"
+
+
+def test_amplicon_carries_mismatch_count():
+    fwd = "AAAGGGCTACGTTGCAATCG"
+    rev = "CCCTTTGCAGTACTTAGGAC"
+    rev_rc = str(Seq(rev).reverse_complement())
+    spacer = "A" * 100
+    fwd_5mm = "CC" + fwd[2:]               # 2 mismatches in the 5' tail
+    template = ("GG" + fwd + spacer + rev_rc
+                + ("T" * 300) + fwd_5mm + spacer + rev_rc + "GG")
+    res = pd.in_silico_pcr(fwd, rev, _genome_from_str(template),
+                           min_product=50, max_product=200,
+                           seed_len=12, max_mismatches=2)
+    assert res["count"] == 2
+    mms = sorted(a[4] for a in res["amplicons"])
+    assert mms == [0, 2]                    # perfect site + 2-mismatch off-target
+    assert res["max_mismatches_observed"] == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -329,6 +359,46 @@ def test_result_row_matches_columns():
     r["specificity"] = "Not tested"
     row = pd.result_to_row(r)
     assert len(row) == len(pd.RESULT_COLUMNS)
+
+
+# --------------------------------------------------------------------------- #
+# Quality warnings (Tm balance + secondary structure)
+# --------------------------------------------------------------------------- #
+def test_design_reports_tm_diff():
+    template = _random_seq(800, seed=42)
+    r = pd.design_primers_for_sequence("g", template,
+                                       pd.PrimerParams(product_min=100, product_max=400))
+    assert r["status"] == "OK"
+    assert r["tm_diff"] == round(abs(r["fwd_tm"] - r["rev_tm"]), 2)
+
+
+def test_primer_warnings_flags_problems():
+    bad = {
+        "fwd_tm": 60.0, "rev_tm": 68.0,          # ΔTm 8°C
+        "fwd_hairpin_tm": 55.0, "rev_hairpin_tm": 10.0,
+        "fwd_homodimer_tm": 10.0, "rev_homodimer_tm": 10.0,
+        "heterodimer_tm": 50.0,
+    }
+    warns = pd.primer_warnings(bad)
+    joined = " ".join(warns)
+    assert any("ΔTm" in w for w in warns)
+    assert "hairpin" in joined and "hetero-dimer" in joined
+
+
+def test_primer_warnings_clean_pair_is_empty():
+    good = {
+        "fwd_tm": 60.0, "rev_tm": 60.5,
+        "fwd_hairpin_tm": 20.0, "rev_hairpin_tm": 18.0,
+        "fwd_homodimer_tm": 5.0, "rev_homodimer_tm": 5.0,
+        "heterodimer_tm": 12.0,
+    }
+    assert pd.primer_warnings(good) == []
+
+
+def test_primer_warnings_tolerates_missing_values():
+    # None values (failed Tm/structure calc) must not raise.
+    assert pd.primer_warnings({}) == []
+    assert pd.primer_warnings({"fwd_tm": None, "rev_tm": 60.0}) == []
 
 
 if __name__ == "__main__":
