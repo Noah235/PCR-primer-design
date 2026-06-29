@@ -30,6 +30,10 @@ GUI** or a **headless CLI**, with all logic in an importable, tested core module
   mismatches each predicted off-target carries (e.g. *"Non-specific (3
   amplicons, up to 2 mismatches)"*), so a perfect on-target is distinguishable
   from a weak, mismatched off-target.
+- **Ranked alternate candidates** — ask for the *N* best primer pairs per
+  template (`--num-return`/GUI *Candidates* field) and get one row each, ordered
+  by Primer3 rank (`Rank` column). Lets you pick a cleaner alternate when the top
+  pair carries a warning, without re-running.
 - **Internally consistent Tm** (reported under the same salt conditions used for
   design).
 - **Primer placement control** — choose where each primer lands relative to the
@@ -90,6 +94,10 @@ python primer_cli.py genome ... --placement custom --fwd-region upstream --rev-r
 python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \
     --specificity --seed-len 12 --max-mismatches 2 -o primers.csv
 
+# Report the 3 best ranked primer pairs per gene (one row each, Rank 1..3)
+python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \
+    --num-return 3 -o primers.csv
+
 python primer_cli.py genome --help    # full parameter list
 ```
 
@@ -114,9 +122,12 @@ spec = pd.in_silico_pcr(result["forward"], result["reverse"], genome,
 
 ## Output (CSV columns)
 
-Gene name · Placement · Forward/Reverse primer · Tm · GC% · Product length ·
-Tm Diff · Hairpin Tm (F/R) · Self-dimer Tm (F/R) · Hetero-dimer Tm ·
+Gene name · Placement · Rank · Forward/Reverse primer · Tm · GC% · Product
+length · Tm Diff · Hairpin Tm (F/R) · Self-dimer Tm (F/R) · Hetero-dimer Tm ·
 Specificity check · Warnings · Status.
+
+The **Rank** column is 1 for the primary pair; higher numbers are alternates
+(only present when `--num-return`/the GUI *Candidates* field is > 1).
 
 The **Warnings** column is empty for a clean pair; otherwise it summarises the
 risks (e.g. `ΔTm 6.2°C; high fwd hairpin (52°C)`). The **Specificity check**

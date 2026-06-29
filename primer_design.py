@@ -646,6 +646,7 @@ def _new_result(seq_id: str, placement: str) -> dict:
     return {
         "gene": seq_id,
         "placement": placement,
+        "rank": 0,
         "forward": None,
         "reverse": None,
         "fwd_tm": None,
@@ -664,69 +665,22 @@ def _new_result(seq_id: str, placement: str) -> dict:
     }
 
 
-def design_primers_for_sequence(
-    seq_id: str,
-    template: str,
-    params: PrimerParams,
-    *,
-    fwd_region: Optional[Tuple[int, int]] = None,
-    rev_region: Optional[Tuple[int, int]] = None,
-    product_range: Optional[Tuple[int, int]] = None,
-    placement: str = "internal",
-) -> dict:
-    """Design a single best primer pair for one template.
+def _extract_candidate(
+    primers: dict, idx: int, seq_id: str, placement: str,
+    thermo: ThermoParams, rank: int,
+) -> Optional[dict]:
+    """Build a result dict for Primer3 candidate ``idx`` (or ``None`` if absent).
 
-    Optional ``fwd_region`` / ``rev_region`` are ``(start, length)`` windows
-    (in template coordinates) constraining where the left / right primer may be
-    placed, via Primer3's ``SEQUENCE_PRIMER_PAIR_OK_REGION_LIST``. This is how
-    "forward upstream / reverse downstream" style placements are realised.
-    ``product_range`` overrides the parameter product-size window for this call
-    (needed when a placement spans flanks larger than the default window).
-
-    Returns a result dict with primer sequences, Tm/GC, product size,
-    secondary-structure metrics and a status string. Never raises.
+    Candidates are 0-indexed and Primer3-ranked (0 is the best pair); ``rank``
+    is the 0-based position written to the output so users can tell the primary
+    pair from an alternate.
     """
-    p3_seq = _p3_template(template)
-    clean_len = len(clean_sequence(template))
-    result = _new_result(seq_id, placement)
-
-    if clean_len < params.min_size * 2:
-        result["status"] = f"Template too short ({clean_len} bp)"
-        return result
-    eff_min_product = (product_range or (params.product_min, params.product_max))[0]
-    if len(p3_seq) < eff_min_product:
-        result["status"] = (
-            f"Template ({len(p3_seq)} bp) shorter than min product "
-            f"({eff_min_product} bp)"
-        )
-        return result
-
-    seq_args = {"SEQUENCE_ID": seq_id, "SEQUENCE_TEMPLATE": p3_seq}
-    if fwd_region is not None or rev_region is not None:
-        fl = fwd_region if fwd_region is not None else (-1, -1)
-        rl = rev_region if rev_region is not None else (-1, -1)
-        seq_args["SEQUENCE_PRIMER_PAIR_OK_REGION_LIST"] = [
-            [int(fl[0]), int(fl[1]), int(rl[0]), int(rl[1])]
-        ]
-    global_args = params.to_primer3_global()
-    if product_range is not None:
-        global_args["PRIMER_PRODUCT_SIZE_RANGE"] = [[int(product_range[0]), int(product_range[1])]]
-
-    try:
-        primers = primer3.bindings.design_primers(seq_args, global_args)
-    except Exception as exc:
-        result["status"] = f"Primer3 error: {str(exc)[:80]}"
-        return result
-
-    fwd = primers.get("PRIMER_LEFT_0_SEQUENCE")
-    rev = primers.get("PRIMER_RIGHT_0_SEQUENCE")
+    fwd = primers.get(f"PRIMER_LEFT_{idx}_SEQUENCE")
+    rev = primers.get(f"PRIMER_RIGHT_{idx}_SEQUENCE")
     if not fwd or not rev:
-        explain = primers.get("PRIMER_PAIR_EXPLAIN", "")
-        if explain:
-            result["status"] = f"No suitable primers ({explain})"
-        return result
-
-    thermo = params.thermo
+        return None
+    result = _new_result(seq_id, placement)
+    result["rank"] = rank
     fwd_struct = analyze_oligo(fwd, thermo)
     rev_struct = analyze_oligo(rev, thermo)
     fwd_tm, rev_tm = calc_tm(fwd, thermo), calc_tm(rev, thermo)
@@ -738,7 +692,7 @@ def design_primers_for_sequence(
             "fwd_gc": calc_gc(fwd),
             "rev_tm": rev_tm,
             "rev_gc": calc_gc(rev),
-            "product_size": primers.get("PRIMER_PAIR_0_PRODUCT_SIZE"),
+            "product_size": primers.get(f"PRIMER_PAIR_{idx}_PRODUCT_SIZE"),
             "tm_diff": (round(abs(fwd_tm - rev_tm), 2)
                         if fwd_tm is not None and rev_tm is not None else None),
             "fwd_hairpin_tm": fwd_struct["hairpin_tm"],
@@ -751,6 +705,109 @@ def design_primers_for_sequence(
     )
     result["warnings"] = "; ".join(primer_warnings(result))
     return result
+
+
+def design_primer_candidates(
+    seq_id: str,
+    template: str,
+    params: PrimerParams,
+    *,
+    fwd_region: Optional[Tuple[int, int]] = None,
+    rev_region: Optional[Tuple[int, int]] = None,
+    product_range: Optional[Tuple[int, int]] = None,
+    placement: str = "internal",
+    max_candidates: Optional[int] = None,
+) -> List[dict]:
+    """Design up to ``N`` ranked primer pairs for one template.
+
+    Returns a list of result dicts ordered by Primer3 rank (rank 0 = best).
+    ``N`` defaults to ``params.num_return``; ``max_candidates`` overrides it.
+    On any failure (template too short, Primer3 error, no pairs found) a
+    single result dict carrying an explanatory ``status`` is returned, so the
+    list is never empty. Never raises.
+
+    Optional ``fwd_region`` / ``rev_region`` are ``(start, length)`` windows
+    (in template coordinates) constraining where the left / right primer may be
+    placed, via Primer3's ``SEQUENCE_PRIMER_PAIR_OK_REGION_LIST``. This is how
+    "forward upstream / reverse downstream" style placements are realised.
+    ``product_range`` overrides the parameter product-size window for this call
+    (needed when a placement spans flanks larger than the default window).
+    """
+    p3_seq = _p3_template(template)
+    clean_len = len(clean_sequence(template))
+    result = _new_result(seq_id, placement)
+
+    if clean_len < params.min_size * 2:
+        result["status"] = f"Template too short ({clean_len} bp)"
+        return [result]
+    eff_min_product = (product_range or (params.product_min, params.product_max))[0]
+    if len(p3_seq) < eff_min_product:
+        result["status"] = (
+            f"Template ({len(p3_seq)} bp) shorter than min product "
+            f"({eff_min_product} bp)"
+        )
+        return [result]
+
+    n_return = max(1, max_candidates if max_candidates is not None else params.num_return)
+    seq_args = {"SEQUENCE_ID": seq_id, "SEQUENCE_TEMPLATE": p3_seq}
+    if fwd_region is not None or rev_region is not None:
+        fl = fwd_region if fwd_region is not None else (-1, -1)
+        rl = rev_region if rev_region is not None else (-1, -1)
+        seq_args["SEQUENCE_PRIMER_PAIR_OK_REGION_LIST"] = [
+            [int(fl[0]), int(fl[1]), int(rl[0]), int(rl[1])]
+        ]
+    global_args = params.to_primer3_global()
+    global_args["PRIMER_NUM_RETURN"] = n_return
+    if product_range is not None:
+        global_args["PRIMER_PRODUCT_SIZE_RANGE"] = [[int(product_range[0]), int(product_range[1])]]
+
+    try:
+        primers = primer3.bindings.design_primers(seq_args, global_args)
+    except Exception as exc:
+        result["status"] = f"Primer3 error: {str(exc)[:80]}"
+        return [result]
+
+    n_found = int(primers.get("PRIMER_PAIR_NUM_RETURNED", 0) or 0)
+    thermo = params.thermo
+    candidates: List[dict] = []
+    for idx in range(min(n_found, n_return)):
+        cand = _extract_candidate(primers, idx, seq_id, placement, thermo, len(candidates))
+        if cand is not None:
+            candidates.append(cand)
+
+    if not candidates:
+        explain = primers.get("PRIMER_PAIR_EXPLAIN", "")
+        if explain:
+            result["status"] = f"No suitable primers ({explain})"
+        return [result]
+    return candidates
+
+
+def design_primers_for_sequence(
+    seq_id: str,
+    template: str,
+    params: PrimerParams,
+    *,
+    fwd_region: Optional[Tuple[int, int]] = None,
+    rev_region: Optional[Tuple[int, int]] = None,
+    product_range: Optional[Tuple[int, int]] = None,
+    placement: str = "internal",
+) -> dict:
+    """Design the single best primer pair for one template (rank-0 candidate).
+
+    Thin wrapper over :func:`design_primer_candidates` returning only the top
+    pair, kept for back-compatible single-pair callers. See that function for
+    the meaning of the optional region / product-range arguments.
+
+    Returns a result dict with primer sequences, Tm/GC, product size,
+    secondary-structure metrics and a status string. Never raises.
+    """
+    return design_primer_candidates(
+        seq_id, template, params,
+        fwd_region=fwd_region, rev_region=rev_region,
+        product_range=product_range, placement=placement,
+        max_candidates=1,
+    )[0]
 
 
 def build_gene_template(
@@ -846,8 +903,8 @@ def design_for_gene(
         # Feasible product window for this region pair.
         max_prod = min(len(template), (rreg[0] + rreg[1]) - freg[0])
         product_range = (params.product_min, max_prod)
-        results.append(
-            design_primers_for_sequence(
+        results.extend(
+            design_primer_candidates(
                 name, template, params,
                 fwd_region=freg, rev_region=rreg,
                 product_range=product_range, placement=label,
@@ -858,7 +915,7 @@ def design_for_gene(
 
 # Column order shared by CSV writers and the GUI.
 RESULT_COLUMNS = [
-    "Gene Name", "Placement",
+    "Gene Name", "Placement", "Rank",
     "Forward Primer", "Fwd Tm", "Fwd GC%",
     "Reverse Primer", "Rev Tm", "Rev GC%",
     "Product Length", "Tm Diff",
@@ -873,7 +930,7 @@ def result_to_row(r: dict) -> list:
     def s(v):
         return "N/A" if v is None else v
     return [
-        r["gene"], r.get("placement", "internal"),
+        r["gene"], r.get("placement", "internal"), r.get("rank", 0) + 1,
         s(r["forward"]), s(r["fwd_tm"]), s(r["fwd_gc"]),
         s(r["reverse"]), s(r["rev_tm"]), s(r["rev_gc"]),
         s(r["product_size"]), s(r.get("tm_diff")),
@@ -895,4 +952,6 @@ def params_summary(params: PrimerParams, extra: str = "") -> str:
         f"Product {d['product_min']}-{d['product_max']}, "
         f"GC-clamp {d['gc_clamp']}, mv={d['thermo']['mv_conc']}mM"
     )
+    if d["num_return"] > 1:
+        base += f", candidates/template={d['num_return']}"
     return f"Parameters: {base}{(', ' + extra) if extra else ''}"
