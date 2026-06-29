@@ -12,6 +12,9 @@ GUI** or a **headless CLI**, with all logic in an importable, tested core module
   - **Genome FASTA + GFF3** — extract each gene (with optional flanks) and design primers.
   - **CDS FASTA only** — design directly from coding sequences.
 - Primer design via Primer3 with tunable size, Tm, GC%, product size and GC-clamp.
+- **Ranked alternate primer pairs** — ask for the top *N* pairs per target
+  (`--num-return N` / GUI *Primers/target*) so you have bench-ready fallbacks if
+  the best pair fails; each candidate is fully scored and gets its own `Rank` row.
 - **Accurate, two-orientation in-silico PCR** specificity check that counts every
   predicted amplicon across the genome (catches off-targets the naive
   single-orientation search misses).
@@ -19,7 +22,10 @@ GUI** or a **headless CLI**, with all logic in an importable, tested core module
   that a primer only extends when its 3′ end matches: the 3′ seed must match
   exactly while a budget of 5′ mismatches is allowed, surfacing off-targets that
   exact matching silently misses. Enabled with `--seed-len`/`--max-mismatches`
-  (CLI) or the *3′ seed* / *Max mismatches* fields (GUI).
+  (CLI) or the *3′ seed* / *Max mismatches* fields (GUI). The specificity column
+  reports the **nearest off-target's mismatch count**, so a pair that only
+  mis-primes at distant (high-mismatch) sites is distinguishable from one with a
+  perfect-match off-target.
 - **Secondary-structure reporting** per primer: hairpin Tm, self-dimer Tm, and
   primer-pair hetero-dimer Tm — so you can spot primers likely to fail.
 - **At-a-glance quality warnings** — a `Warnings` column flags the actual
@@ -94,9 +100,9 @@ python primer_cli.py genome ... --placement custom --fwd-region upstream --rev-r
 python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \
     --specificity --seed-len 12 --max-mismatches 2 -o primers.csv
 
-# Report the 3 best ranked primer pairs per gene (one row each, Rank 1..3)
+# Report the top 3 ranked primer pairs per gene (bench-ready fallbacks)
 python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \
-    --num-return 3 -o primers.csv
+    --num-return 3 -o ranked_primers.csv
 
 python primer_cli.py genome --help    # full parameter list
 ```
@@ -122,21 +128,14 @@ spec = pd.in_silico_pcr(result["forward"], result["reverse"], genome,
 
 ## Output (CSV columns)
 
-Gene name · Placement · Rank · Forward/Reverse primer · Tm · GC% · Product
-length · Tm Diff · Hairpin Tm (F/R) · Self-dimer Tm (F/R) · Hetero-dimer Tm ·
-Specificity check · Warnings · Status.
-
-The **Rank** column is 1 for the primary pair; higher numbers are alternates
-(only present when `--num-return`/the GUI *Candidates* field is > 1).
-
-The **Warnings** column is empty for a clean pair; otherwise it summarises the
-risks (e.g. `ΔTm 6.2°C; high fwd hairpin (52°C)`). The **Specificity check**
-also reports the worst mismatch count of any predicted amplicon when the
-mismatch-tolerant search is used.
+Gene name · Placement · Rank · Forward/Reverse primer · Tm · GC% · Product length ·
+Hairpin Tm (F/R) · Self-dimer Tm (F/R) · Hetero-dimer Tm ·
+Specificity check · Status.
 
 The **Placement** column records where the pair was designed (e.g.
 `internal->internal`, `upstream->downstream`). With `--placement all` you get one
-row per permutation per gene.
+row per permutation per gene. The **Rank** column (1 = best) distinguishes ranked
+alternates when `--num-return > 1`.
 
 In genome mode an additional `*_extracted_sequences.fasta` is written with each
 gene's 5′ flank, 3′ flank and coding region.

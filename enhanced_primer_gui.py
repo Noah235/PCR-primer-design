@@ -47,7 +47,8 @@ def _run_genome_gff(params, output_csv, genome_path, gff_path, target_names,
         for i, gene in enumerate(gene_list):
             if i % 10 == 0:
                 log(f"Processing gene {i + 1}/{len(gene_list)}...")
-            for r in pd.design_for_gene(genome, gene, params, flank_size, mode=placement):
+            for r in pd.design_for_gene(genome, gene, params, flank_size, mode=placement,
+                                        num_candidates=params.num_return):
                 if do_specificity and r["status"] == "OK":
                     # Window generous enough to include this pair's own amplicon.
                     max_prod = max(params.product_max, (r["product_size"] or 0) + 500)
@@ -96,13 +97,14 @@ def _run_cds(params, output_csv, cds_path, target_names, log):
         for i, (name, info) in enumerate(filtered.items()):
             if i % 10 == 0:
                 log(f"Processing CDS {i + 1}/{len(filtered)}...")
-            for r in pd.design_primer_candidates(name, info["sequence"], params):
+            for r in pd.design_primer_candidates(name, info["sequence"], params,
+                                                 num_candidates=params.num_return):
                 r["specificity"] = "N/A (CDS mode)"
                 if r["status"] == "OK":
                     n_ok += 1
                 writer.writerow(pd.result_to_row(r))
 
-    log(f"Done. {n_ok}/{len(filtered)} CDS had suitable primers")
+    log(f"Done. {n_ok} primer pair(s) designed across {len(filtered)} CDS")
     log(f"Output: {os.path.abspath(output_csv)}")
     return n_ok, len(filtered)
 
@@ -205,6 +207,8 @@ def main():  # pragma: no cover - interactive GUI
     # Mismatch-tolerant specificity controls (seed_len=0 -> exact match).
     seed_len_e = add_entry("3' seed (0=exact)", 5, 0, 0)
     max_mm_e = add_entry("Max mismatches", 5, 2, 0)
+    # Ranked alternates: how many primer pairs to report per target (1 = best).
+    num_return_e = add_entry("Primers/target", 5, 4, defaults.num_return)
 
     # Primer placement relative to the gene (genome+GFF mode only).
     placement_label = tk.Label(param_frame, text="Primer placement")
@@ -252,7 +256,8 @@ def main():  # pragma: no cover - interactive GUI
             max_tm=float(max_tm_e.get()),
             min_gc=float(min_gc_e.get()), max_gc=float(max_gc_e.get()),
             product_min=int(min_prod_e.get()), product_max=int(max_prod_e.get()),
-            gc_clamp=int(gc_clamp_e.get()), num_return=int(num_return_e.get() or 1),
+            gc_clamp=int(gc_clamp_e.get()),
+            num_return=max(1, int(num_return_e.get() or 1)),
         )
         problems = params.validate()
         if problems:

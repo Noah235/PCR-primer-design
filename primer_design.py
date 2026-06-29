@@ -508,11 +508,11 @@ def in_silico_pcr(
     non-specificity — this models the biology (3′ end must match to extend)
     while keeping 5′ mismatches tolerated.
 
-    Returns ``{"count": int, "amplicons": [(chrom, start, end, size,
-    mismatches), ...], "max_mismatches_observed": int}``. ``mismatches`` is the
-    combined number of mismatches of the two primers for that amplicon (always
-    ``0`` in exact mode), so off-targets that bind imperfectly can be told apart
-    from a perfect on-target hit.
+    Returns ``{"count": int, "amplicons": [(chrom, start, end, size, mm), ...]}``
+    where ``mm`` is the total number of mismatches (forward + reverse) of that
+    predicted amplicon. In exact mode ``mm`` is always 0; in mismatch-tolerant
+    mode the intended amplicon is 0 and off-targets are >= 1, so the smallest
+    non-zero ``mm`` tells you how close the nearest off-target is to priming.
     """
     fwd = clean_sequence(forward_primer)
     rev = clean_sequence(reverse_primer)
@@ -540,16 +540,26 @@ def in_silico_pcr(
             continue
 
         rev_sites.sort()
-        for f_left, _flen, fmm in fwd_sites:
-            for r_left, r_len, rmm in rev_sites:
+        # Smallest reverse footprint present; used for a *correct* early break.
+        # The product of a downstream reverse site is at least
+        # ``r_left - f_left + min_rev_len``, so once that lower bound exceeds
+        # ``max_product`` no later (larger ``r_left``) site can qualify. Using
+        # the minimum footprint length keeps the break correct even when the
+        # two primers differ in length (the old ``break`` on ``product`` could
+        # skip a valid longer-footprint amplicon).
+        min_rev_len = min(s[1] for s in rev_sites)
+        for f_left, _flen, f_mm in fwd_sites:
+            for r_left, r_len, r_mm in rev_sites:
                 if r_left < f_left:
                     continue
+                if (r_left - f_left) + min_rev_len > max_product:
+                    break  # rev_sites sorted by r_left; all later ones larger
                 product = (r_left + r_len) - f_left
-                if product < min_product:
+                if product < min_product or product > max_product:
                     continue
-                if product > max_product:
-                    break  # rev_sites sorted; further ones only larger
-                amplicons.append((chrom, f_left, r_left + r_len, product, fmm + rmm))
+                amplicons.append(
+                    (chrom, f_left, r_left + r_len, product, f_mm + r_mm)
+                )
 
     max_mm = max((a[4] for a in amplicons), default=0)
     return {
@@ -562,9 +572,10 @@ def in_silico_pcr(
 def specificity_label(result: dict) -> str:
     """Human-readable summary of :func:`in_silico_pcr` output.
 
-    When the mismatch-tolerant search found imperfectly-binding sites the worst
-    mismatch count is appended, e.g. ``"Non-specific (3 amplicons, up to 2
-    mismatches)"`` — useful to gauge how plausible an off-target really is.
+    For a non-specific pair the nearest off-target's mismatch count (when
+    available) is appended, so a result that only mis-primes at sites carrying
+    several mismatches reads very differently from one with a perfect-match
+    off-target.
     """
     count = result.get("count", -1)
     if count < 0:
@@ -574,52 +585,13 @@ def specificity_label(result: dict) -> str:
     mm = result.get("max_mismatches_observed", 0)
     note = f", up to {mm} mismatch{'es' if mm != 1 else ''}" if mm else ""
     if count == 1:
-        return f"Specific (1 amplicon{note})"
-    return f"Non-specific ({count} amplicons{note})"
-
-
-# --------------------------------------------------------------------------- #
-# Quality warnings
-# --------------------------------------------------------------------------- #
-# Heuristic thresholds for flagging a primer pair that is likely to amplify
-# poorly. Secondary-structure Tm values near the annealing temperature mean the
-# structure competes with template binding; a large Tm difference between the
-# two primers means one anneals far better than the other at a single cycling
-# temperature. These are screening defaults, not hard limits.
-WARN_MAX_TM_DIFF = 5.0        # °C; mismatched pair Tm hurts co-amplification
-WARN_HAIRPIN_TM = 45.0        # °C; hairpin stable near typical annealing temps
-WARN_DIMER_TM = 45.0          # °C; self-/hetero-dimer stable near annealing
-
-
-def primer_warnings(
-    result: dict,
-    *,
-    max_tm_diff: float = WARN_MAX_TM_DIFF,
-    hairpin_tm: float = WARN_HAIRPIN_TM,
-    dimer_tm: float = WARN_DIMER_TM,
-) -> List[str]:
-    """Return human-readable risk warnings for a design ``result`` (maybe empty).
-
-    Surfaces the secondary-structure / Tm-balance problems that are otherwise
-    buried in the numeric columns, so a user can see *at a glance* why a primer
-    pair might fail rather than having to interpret six Tm numbers themselves.
-    """
-    warns: List[str] = []
-    ft, rt = result.get("fwd_tm"), result.get("rev_tm")
-    if ft is not None and rt is not None and abs(ft - rt) > max_tm_diff:
-        warns.append(f"ΔTm {abs(ft - rt):.1f}°C")
-    for label, key in (("fwd hairpin", "fwd_hairpin_tm"),
-                       ("rev hairpin", "rev_hairpin_tm")):
-        v = result.get(key)
-        if v is not None and v > hairpin_tm:
-            warns.append(f"high {label} ({v:.0f}°C)")
-    for label, key in (("fwd self-dimer", "fwd_homodimer_tm"),
-                       ("rev self-dimer", "rev_homodimer_tm"),
-                       ("hetero-dimer", "heterodimer_tm")):
-        v = result.get(key)
-        if v is not None and v > dimer_tm:
-            warns.append(f"high {label} ({v:.0f}°C)")
-    return warns
+        return "Specific (1 amplicon)"
+    offtarget_mm = [a[4] for a in result.get("amplicons", []) if len(a) > 4 and a[4] > 0]
+    if offtarget_mm:
+        m = min(offtarget_mm)
+        return (f"Non-specific ({count} amplicons; nearest off-target "
+                f"{m} mismatch{'es' if m != 1 else ''})")
+    return f"Non-specific ({count} amplicons)"
 
 
 # --------------------------------------------------------------------------- #
@@ -665,36 +637,27 @@ def _new_result(seq_id: str, placement: str) -> dict:
     }
 
 
-def _extract_candidate(
-    primers: dict, idx: int, seq_id: str, placement: str,
-    thermo: ThermoParams, rank: int,
+def _build_candidate(
+    seq_id: str, placement: str, primers: dict, idx: int, thermo: "ThermoParams"
 ) -> Optional[dict]:
-    """Build a result dict for Primer3 candidate ``idx`` (or ``None`` if absent).
-
-    Candidates are 0-indexed and Primer3-ranked (0 is the best pair); ``rank``
-    is the 0-based position written to the output so users can tell the primary
-    pair from an alternate.
-    """
+    """Build a result dict for the ``idx``-th primer pair, or ``None`` if absent."""
     fwd = primers.get(f"PRIMER_LEFT_{idx}_SEQUENCE")
     rev = primers.get(f"PRIMER_RIGHT_{idx}_SEQUENCE")
     if not fwd or not rev:
         return None
     result = _new_result(seq_id, placement)
-    result["rank"] = rank
     fwd_struct = analyze_oligo(fwd, thermo)
     rev_struct = analyze_oligo(rev, thermo)
-    fwd_tm, rev_tm = calc_tm(fwd, thermo), calc_tm(rev, thermo)
     result.update(
         {
+            "rank": idx,
             "forward": fwd,
             "reverse": rev,
-            "fwd_tm": fwd_tm,
+            "fwd_tm": calc_tm(fwd, thermo),
             "fwd_gc": calc_gc(fwd),
-            "rev_tm": rev_tm,
+            "rev_tm": calc_tm(rev, thermo),
             "rev_gc": calc_gc(rev),
             "product_size": primers.get(f"PRIMER_PAIR_{idx}_PRODUCT_SIZE"),
-            "tm_diff": (round(abs(fwd_tm - rev_tm), 2)
-                        if fwd_tm is not None and rev_tm is not None else None),
             "fwd_hairpin_tm": fwd_struct["hairpin_tm"],
             "rev_hairpin_tm": rev_struct["hairpin_tm"],
             "fwd_homodimer_tm": fwd_struct["homodimer_tm"],
@@ -703,7 +666,6 @@ def _extract_candidate(
             "status": "OK",
         }
     )
-    result["warnings"] = "; ".join(primer_warnings(result))
     return result
 
 
@@ -716,15 +678,13 @@ def design_primer_candidates(
     rev_region: Optional[Tuple[int, int]] = None,
     product_range: Optional[Tuple[int, int]] = None,
     placement: str = "internal",
-    max_candidates: Optional[int] = None,
+    num_candidates: int = 1,
 ) -> List[dict]:
-    """Design up to ``N`` ranked primer pairs for one template.
+    """Design up to ``num_candidates`` ranked primer pairs for one template.
 
-    Returns a list of result dicts ordered by Primer3 rank (rank 0 = best).
-    ``N`` defaults to ``params.num_return``; ``max_candidates`` overrides it.
-    On any failure (template too short, Primer3 error, no pairs found) a
-    single result dict carrying an explanatory ``status`` is returned, so the
-    list is never empty. Never raises.
+    Returns a list of result dicts ordered best-first (``rank`` 0 is Primer3's
+    top pair). Offering ranked alternates lets a user fall back to the 2nd/3rd
+    pair when the best one fails at the bench, without re-running the pipeline.
 
     Optional ``fwd_region`` / ``rev_region`` are ``(start, length)`` windows
     (in template coordinates) constraining where the left / right primer may be
@@ -732,7 +692,11 @@ def design_primer_candidates(
     "forward upstream / reverse downstream" style placements are realised.
     ``product_range`` overrides the parameter product-size window for this call
     (needed when a placement spans flanks larger than the default window).
+
+    Always returns at least one dict (a failure result when nothing fits) and
+    never raises.
     """
+    n = max(1, int(num_candidates))
     p3_seq = _p3_template(template)
     clean_len = len(clean_sequence(template))
     result = _new_result(seq_id, placement)
@@ -757,7 +721,7 @@ def design_primer_candidates(
             [int(fl[0]), int(fl[1]), int(rl[0]), int(rl[1])]
         ]
     global_args = params.to_primer3_global()
-    global_args["PRIMER_NUM_RETURN"] = n_return
+    global_args["PRIMER_NUM_RETURN"] = max(n, params.num_return)
     if product_range is not None:
         global_args["PRIMER_PRODUCT_SIZE_RANGE"] = [[int(product_range[0]), int(product_range[1])]]
 
@@ -767,13 +731,12 @@ def design_primer_candidates(
         result["status"] = f"Primer3 error: {str(exc)[:80]}"
         return [result]
 
-    n_found = int(primers.get("PRIMER_PAIR_NUM_RETURNED", 0) or 0)
-    thermo = params.thermo
     candidates: List[dict] = []
-    for idx in range(min(n_found, n_return)):
-        cand = _extract_candidate(primers, idx, seq_id, placement, thermo, len(candidates))
-        if cand is not None:
-            candidates.append(cand)
+    for idx in range(n):
+        cand = _build_candidate(seq_id, placement, primers, idx, params.thermo)
+        if cand is None:
+            break
+        candidates.append(cand)
 
     if not candidates:
         explain = primers.get("PRIMER_PAIR_EXPLAIN", "")
@@ -793,20 +756,16 @@ def design_primers_for_sequence(
     product_range: Optional[Tuple[int, int]] = None,
     placement: str = "internal",
 ) -> dict:
-    """Design the single best primer pair for one template (rank-0 candidate).
+    """Design a single best primer pair for one template (back-compatible).
 
     Thin wrapper over :func:`design_primer_candidates` returning only the top
-    pair, kept for back-compatible single-pair callers. See that function for
-    the meaning of the optional region / product-range arguments.
-
-    Returns a result dict with primer sequences, Tm/GC, product size,
-    secondary-structure metrics and a status string. Never raises.
+    pair. Never raises.
     """
     return design_primer_candidates(
         seq_id, template, params,
         fwd_region=fwd_region, rev_region=rev_region,
         product_range=product_range, placement=placement,
-        max_candidates=1,
+        num_candidates=1,
     )[0]
 
 
@@ -867,12 +826,15 @@ def placement_combos(mode) -> List[Tuple[str, str]]:
 
 
 def design_for_gene(
-    genome: Dict, gene: dict, params: PrimerParams, flank_size: int, mode="internal"
+    genome: Dict, gene: dict, params: PrimerParams, flank_size: int, mode="internal",
+    *, num_candidates: int = 1,
 ) -> List[dict]:
     """Design primers for one gene under one or more placement modes.
 
-    Returns one result dict per requested placement. For ``mode="internal"``
-    with no flanks this is a single internal design (back-compatible).
+    Returns one result dict per requested placement (or ``num_candidates`` rows
+    per placement when ranked alternates are requested). For ``mode="internal"``
+    with no flanks and ``num_candidates=1`` this is a single internal design
+    (back-compatible).
     """
     name = gene["gene_name"] or gene["locus_tag"]
     combos = placement_combos(mode)
@@ -908,6 +870,7 @@ def design_for_gene(
                 name, template, params,
                 fwd_region=freg, rev_region=rreg,
                 product_range=product_range, placement=label,
+                num_candidates=num_candidates,
             )
         )
     return results

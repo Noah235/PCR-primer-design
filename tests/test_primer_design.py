@@ -108,8 +108,7 @@ def test_in_silico_pcr_single_amplicon():
     assert res["count"] == 1
     chrom, start, end, size, mm = res["amplicons"][0]
     assert size == len(fwd) + len(spacer) + len(rev)
-    assert mm == 0                          # exact mode -> no mismatches
-    assert res["max_mismatches_observed"] == 0
+    assert mm == 0  # exact match -> no mismatches
 
 
 def test_in_silico_pcr_detects_second_site():
@@ -209,32 +208,48 @@ def test_specificity_label():
     assert pd.specificity_label({"count": -1, "error": "bad"}) == "bad"
 
 
-def test_specificity_label_reports_mismatches():
-    # When the mismatch-tolerant search saw imperfect sites, say so.
-    label = pd.specificity_label({"count": 2, "max_mismatches_observed": 2})
-    assert "up to 2 mismatches" in label
-    one = pd.specificity_label({"count": 1, "max_mismatches_observed": 1})
-    assert "up to 1 mismatch" in one and "mismatches" not in one
-    # No mismatch info -> unchanged wording.
-    assert pd.specificity_label({"count": 1, "max_mismatches_observed": 0}) \
-        == "Specific (1 amplicon)"
+def test_specificity_label_reports_offtarget_mismatches():
+    """A non-specific result surfaces the nearest off-target's mismatch count."""
+    res = {"count": 2, "amplicons": [
+        ("chr1", 0, 120, 120, 0),   # intended (perfect)
+        ("chr1", 400, 520, 120, 2),  # off-target with 2 mismatches
+    ]}
+    label = pd.specificity_label(res)
+    assert "Non-specific (2 amplicons" in label
+    assert "2 mismatches" in label
+    # Singular grammar for a one-mismatch off-target.
+    res["amplicons"][1] = ("chr1", 400, 520, 120, 1)
+    assert "1 mismatch)" in pd.specificity_label(res)
 
 
-def test_amplicon_carries_mismatch_count():
+def test_in_silico_pcr_amplicon_carries_mismatch_count():
     fwd = "AAAGGGCTACGTTGCAATCG"
     rev = "CCCTTTGCAGTACTTAGGAC"
     rev_rc = str(Seq(rev).reverse_complement())
     spacer = "A" * 100
-    fwd_5mm = "CC" + fwd[2:]               # 2 mismatches in the 5' tail
+    fwd_5mm = "CC" + fwd[2:]           # off-target: 2 mismatches, 3' seed intact
     template = ("GG" + fwd + spacer + rev_rc
                 + ("T" * 300) + fwd_5mm + spacer + rev_rc + "GG")
     res = pd.in_silico_pcr(fwd, rev, _genome_from_str(template),
                            min_product=50, max_product=200,
                            seed_len=12, max_mismatches=2)
-    assert res["count"] == 2
-    mms = sorted(a[4] for a in res["amplicons"])
-    assert mms == [0, 2]                    # perfect site + 2-mismatch off-target
-    assert res["max_mismatches_observed"] == 2
+    mismatches = sorted(a[4] for a in res["amplicons"])
+    assert mismatches == [0, 2]      # perfect site + 2-mismatch off-target
+
+
+def test_in_silico_pcr_unequal_primer_lengths_large_product():
+    """Regression for the early-break bug: with primers of different lengths a
+    large but in-window amplicon must not be skipped by the sort/break prune."""
+    fwd = "AAAGGGCTACGTTGCAATCG"            # 20 bp
+    rev = "CCCTTTGCAGTACTTAGGACAGTCA"       # 25 bp
+    rev_rc = str(Seq(rev).reverse_complement())
+    spacer = "A" * 400
+    template = "GG" + fwd + spacer + rev_rc + "GG"
+    expected = len(fwd) + len(spacer) + len(rev)
+    res = pd.in_silico_pcr(fwd, rev, _genome_from_str(template),
+                           min_product=50, max_product=expected)
+    assert res["count"] == 1
+    assert res["amplicons"][0][3] == expected
 
 
 # --------------------------------------------------------------------------- #
@@ -256,6 +271,42 @@ def test_design_primers_success():
     # reported Tm should be within the requested window (consistency check)
     assert params.min_tm - 5 <= r["fwd_tm"] <= params.max_tm + 5
     assert r["heterodimer_tm"] is not None
+
+
+def test_design_primer_candidates_ranked_alternates():
+    """Requesting N candidates returns up to N distinct, rank-ordered pairs."""
+    template = _random_seq(1500, seed=11)
+    params = pd.PrimerParams(product_min=100, product_max=600)
+    cands = pd.design_primer_candidates("synthetic", template, params, num_candidates=3)
+    assert 1 <= len(cands) <= 3
+    # Ranks are 0,1,2... in order and all report OK with a primer pair.
+    assert [c["rank"] for c in cands] == list(range(len(cands)))
+    assert all(c["status"] == "OK" and c["forward"] and c["reverse"] for c in cands)
+    if len(cands) > 1:
+        # Alternates must be genuinely different oligos, not duplicates.
+        pairs = {(c["forward"], c["reverse"]) for c in cands}
+        assert len(pairs) == len(cands)
+
+
+def test_design_primers_for_sequence_is_first_candidate():
+    """The single-result wrapper must equal the top-ranked candidate."""
+    template = _random_seq(900, seed=12)
+    params = pd.PrimerParams(product_min=100, product_max=400)
+    single = pd.design_primers_for_sequence("g", template, params)
+    first = pd.design_primer_candidates("g", template, params, num_candidates=2)[0]
+    assert single["forward"] == first["forward"]
+    assert single["reverse"] == first["reverse"]
+    assert single["rank"] == 0
+
+
+def test_design_for_gene_num_candidates_multiplies_rows():
+    genome, gene = _placement_genome()
+    params = pd.PrimerParams(product_min=100, product_max=500)
+    results = pd.design_for_gene(genome, gene, params, flank_size=150,
+                                 num_candidates=3)
+    assert len(results) >= 1
+    assert all(r["placement"] == "internal->internal" for r in results)
+    assert [r["rank"] for r in results] == list(range(len(results)))
 
 
 def test_design_primers_template_too_short():

@@ -40,8 +40,7 @@ def _add_param_args(p):
     g.add_argument("--product-max", type=int, default=d.product_max)
     g.add_argument("--gc-clamp", type=int, default=d.gc_clamp)
     g.add_argument("--num-return", type=int, default=d.num_return,
-                   help="ranked primer-pair candidates to report per template "
-                        "(1 = best only; each extra pair is an additional row)")
+                   help="ranked primer pairs to report per target (1 = best only)")
 
 
 def _params_from_args(a) -> pd.PrimerParams:
@@ -50,7 +49,7 @@ def _params_from_args(a) -> pd.PrimerParams:
         min_tm=a.min_tm, opt_tm=a.opt_tm, max_tm=a.max_tm,
         min_gc=a.min_gc, max_gc=a.max_gc,
         product_min=a.product_min, product_max=a.product_max,
-        gc_clamp=a.gc_clamp, num_return=a.num_return,
+        gc_clamp=a.gc_clamp, num_return=max(1, a.num_return),
     )
     problems = params.validate()
     if problems:
@@ -95,7 +94,8 @@ def run_genome(a):
     prepared_genome = pd.prepare_genome(genome) if a.specificity else None
     rows, n_ok = [], 0
     for gene in gene_list:
-        for r in pd.design_for_gene(genome, gene, params, a.flank, mode=placement):
+        for r in pd.design_for_gene(genome, gene, params, a.flank, mode=placement,
+                                    num_candidates=params.num_return):
             if a.specificity and r["status"] == "OK":
                 max_prod = max(params.product_max, (r["product_size"] or 0) + 500)
                 spec = pd.in_silico_pcr(r["forward"], r["reverse"], prepared_genome,
@@ -137,13 +137,15 @@ def run_cds(a):
 
     rows, n_ok = [], 0
     for name, info in cds.items():
-        for r in pd.design_primer_candidates(name, info["sequence"], params):
+        for r in pd.design_primer_candidates(name, info["sequence"], params,
+                                             num_candidates=params.num_return):
             r["specificity"] = "N/A (CDS mode)"
             n_ok += r["status"] == "OK"
             rows.append(pd.result_to_row(r))
 
     _write(a.output, pd.params_summary(params, f"mode=CDS, cds={len(cds)}"), rows)
-    logging.info("%d/%d CDS had suitable primers -> %s", n_ok, len(cds), a.output)
+    logging.info("%d primer pair(s) designed across %d CDS -> %s",
+                 n_ok, len(cds), a.output)
 
 
 def build_parser():

@@ -5,64 +5,46 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 
 ---
 
-## ✅ Done in this iteration
+## ✅ Done in this iteration (latest)
 
-### Accuracy + ease of use — ranked alternate candidates (NEW)
-- **`num_return` is now a real feature, not dead config.** It was plumbed into
-  `PrimerParams` and the Primer3 global args but the design code only ever read
-  candidate index `0`, so requesting more pairs did nothing. New
-  `design_primer_candidates()` returns up to *N* Primer3-ranked pairs (rank 0 =
-  best), each fully analysed (Tm/GC, secondary structure, warnings, and — in the
-  CLI/GUI — its own specificity check). A new **`Rank`** column (1-based) labels
-  the primary pair vs alternates.
-  - **Why it matters:** when the top pair carries a warning (ΔTm, hairpin,
-    dimer) or a non-specific hit, the user can pick a cleaner alternate from the
-    same run instead of re-running with tweaked parameters — better final
-    primers (accuracy) with less iteration (ease of use).
-  - Back-compatible: `design_primers_for_sequence()` is now a thin wrapper that
-    returns the rank-0 pair, so every existing caller is unchanged. Default
-    `num_return=1` produces exactly one row, identical to before (plus the new
-    `Rank` column = 1).
-  - Exposed as `--num-return` (CLI, both `genome` and `cds` modes) and a
-    *Candidates* field (GUI); recorded in the CSV parameter banner when > 1.
-  - Regression-guarded: `test_design_candidates_returns_multiple_ranked`,
-    `test_design_candidates_default_is_single`,
-    `test_design_primers_for_sequence_returns_best`,
-    `test_design_candidates_failure_returns_single_row`,
-    `test_design_for_gene_emits_candidate_rows`.
-  - Benchmarked (new *Ranked candidates* section in `benchmark.py`): 5 ranked
-    pairs cost ~14.5 ms/template vs ~7.0 ms for 1 — Primer3 already enumerates
-    candidates internally, so the extra cost is just per-alternate
-    structure/Tm analysis; the existing design/specificity paths are unchanged.
+### Accuracy — off-target mismatch reporting (NEW)
+- **Each predicted amplicon now carries its mismatch count.** `in_silico_pcr()`
+  amplicons are `(chrom, start, end, size, mismatches)`; the intended product is
+  0 mismatches and off-targets are ≥1 in mismatch-tolerant mode.
+  `specificity_label()` surfaces the **nearest off-target's mismatch count**, so
+  the CSV `Specificity Check` now distinguishes "non-specific, but the nearest
+  off-target carries 3 mismatches" from a perfect-match off-target — the former
+  is far more likely to be fine at the bench. Regression-guarded
+  (`test_specificity_label_reports_offtarget_mismatches`,
+  `test_in_silico_pcr_amplicon_carries_mismatch_count`).
 
-### Ease of use — actionable quality warnings (NEW)
-- **A `Warnings` column tells you *why* a pair might fail, in words.** Previously
-  the output carried six secondary-structure / Tm numbers and left the user to
-  interpret them. `primer_warnings()` now distills them into a short, readable
-  flag string (e.g. `ΔTm 6.2°C; high fwd hairpin (52°C); high hetero-dimer
-  (48°C)`) using screening thresholds (`WARN_MAX_TM_DIFF`, `WARN_HAIRPIN_TM`,
-  `WARN_DIMER_TM`). A clean pair has an empty cell. Flows automatically through
-  both the CLI and GUI (it is part of `result_to_row`).
-- **Explicit `Tm Diff` column.** The Tm difference between the forward and
-  reverse primer is reported directly (`tm_diff`); a large value means one primer
-  out-competes the other at a single annealing temperature — a common, easily
-  missed cause of weak/failed amplification.
-- Regression-guarded: `test_primer_warnings_flags_problems`,
-  `test_primer_warnings_clean_pair_is_empty`,
-  `test_primer_warnings_tolerates_missing_values`, `test_design_reports_tm_diff`.
+### Accuracy bug fix — amplicon enumeration early-break (NEW)
+- The amplicon search sorted reverse binding sites by position and `break`-ed on
+  the first product over `max_product`. When the two primers differ in length a
+  later, longer-footprint site could still be in-window, so a valid (often
+  larger) off-target amplicon could be **silently skipped**. The break now uses
+  the *minimum* reverse footprint length as a correct lower bound, so no
+  in-window amplicon is missed while the prune is preserved. Regression-guarded
+  (`test_in_silico_pcr_unequal_primer_lengths_large_product`); benchmarked — no
+  speed regression (specificity path unchanged within noise).
 
-### Accuracy — per-amplicon mismatch counts in specificity output (NEW)
-- **Off-targets now carry their mismatch count.** `in_silico_pcr()` records the
-  combined primer mismatches of every predicted amplicon (the 5th element of
-  each `amplicons` tuple) and the worst case (`max_mismatches_observed`).
-  `specificity_label()` surfaces it — *"Non-specific (3 amplicons, up to 2
-  mismatches)"* — so a perfect on-target is distinguishable from a weak,
-  imperfectly-binding off-target. This was the top "recommended next" item
-  (gold-standard specificity sub-task). Exact mode still reports `0`.
-  Regression-guarded: `test_amplicon_carries_mismatch_count`,
-  `test_specificity_label_reports_mismatches`.
-- Benchmarked: no measurable change to the specificity path (mismatch counts are
-  already computed per binding site; only the worst case is now retained).
+### Ease of use + accuracy — ranked alternate primer pairs (NEW)
+- **Report the top *N* primer pairs per target, not just the single best.**
+  `PrimerParams.num_return` is now honoured end-to-end: `design_primer_candidates()`
+  returns ranked results (rank 0 = best), `design_for_gene()` takes
+  `num_candidates`, and a `Rank` column was added to the CSV. Exposed as
+  `--num-return` (CLI) and *Primers/target* (GUI). If the best pair fails at the
+  bench the user has scored fallbacks without re-running the pipeline.
+  `design_primers_for_sequence()` is kept as a back-compatible single-result
+  wrapper. Regression-guarded (`test_design_primer_candidates_ranked_alternates`,
+  `test_design_primers_for_sequence_is_first_candidate`,
+  `test_design_for_gene_num_candidates_multiplies_rows`) and benchmarked (new
+  "Ranked alternates" section in `benchmark.py`: 3 pairs ≈ 1.5× the time of 1 for
+  3× the output, since it is a single Primer3 call).
+
+---
+
+## ✅ Done in previous iteration
 
 ### Accuracy — 3′-anchored, mismatch-tolerant specificity
 - **Off-targets bind with mismatches; exact matching under-reports them.** The
@@ -156,10 +138,8 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 1. **Gold-standard specificity via BLAST.** The 3′-anchored mismatch search
    (done) plus per-amplicon mismatch reporting (done — see above) cover the
    common case. For publication-grade off-target prediction, integrate NCBI
-   Primer-BLAST or a local BLAST/`isPcr` so **indels** and **degenerate/IUPAC
-   sites** are handled too (the current search is substitution-only). Weighting
-   3′-proximal mismatches more heavily than 5′ ones would further improve the
-   ranking of plausible off-targets.
+   Primer-BLAST or a local BLAST/`isPcr` so indels and degenerate sites are
+   handled too.
 2. **Faster specificity at genome scale.** The current search is `str.find`
    over each contig per pair (O(genome × pairs)). Build a k-mer index or use a
    suffix automaton / Aho-Corasick over all primers at once for large genomes
@@ -167,12 +147,10 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 3. **Run design off the main thread.** For large gene sets the Tkinter GUI
    freezes during a run; move the pipeline to a worker thread with a progress
    queue.
-4. **Auto-pick the cleanest ranked candidate.** Ranked alternates now exist
-   (done — see above). Next: let a warning/non-specific flag *demote* a
-   candidate so the row reported as "Rank 1" is the cleanest pair, not merely
-   Primer3's score-best one — e.g. re-sort the returned candidates by
-   (specificity OK, warning count, Primer3 rank). Ties into the warning
-   thresholds below.
+4. **Rank/score the alternates.** Ranked alternates are now emitted (done — see
+   above); a natural follow-up is a composite quality score per pair (penalising
+   hairpin/dimer Tm near the annealing temp, GC/Tm imbalance) to re-rank or flag
+   risky candidates beyond Primer3's default ordering.
 
 ## 💡 Nice to have
 - **Expose warning thresholds** (`WARN_MAX_TM_DIFF`, `WARN_HAIRPIN_TM`,
