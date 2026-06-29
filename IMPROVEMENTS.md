@@ -153,6 +153,10 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
    risky candidates beyond Primer3's default ordering.
 
 ## 💡 Nice to have
+- **Expose warning thresholds** (`WARN_MAX_TM_DIFF`, `WARN_HAIRPIN_TM`,
+  `WARN_DIMER_TM`) as CLI flags / GUI fields so users can tune the sensitivity
+  of the `Warnings` column to their assay, and optionally let a warning demote a
+  candidate so a cleaner alternate is chosen (ties into auto-pick above).
 - Save/load parameter presets (JSON) from the GUI.
 - Allow primers to be placed in flanking regions (knockout-verification
   primers), not just inside the gene; the flank size is already extracted.

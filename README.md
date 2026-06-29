@@ -28,6 +28,18 @@ GUI** or a **headless CLI**, with all logic in an importable, tested core module
   perfect-match off-target.
 - **Secondary-structure reporting** per primer: hairpin Tm, self-dimer Tm, and
   primer-pair hetero-dimer Tm — so you can spot primers likely to fail.
+- **At-a-glance quality warnings** — a `Warnings` column flags the actual
+  problems (large Tm difference between the two primers, stable hairpins,
+  self-/hetero-dimers) instead of making you interpret six Tm numbers, plus an
+  explicit `Tm Diff` column for pair Tm balance.
+- **Per-amplicon mismatch counts** — the specificity check reports how many
+  mismatches each predicted off-target carries (e.g. *"Non-specific (3
+  amplicons, up to 2 mismatches)"*), so a perfect on-target is distinguishable
+  from a weak, mismatched off-target.
+- **Ranked alternate candidates** — ask for the *N* best primer pairs per
+  template (`--num-return`/GUI *Candidates* field) and get one row each, ordered
+  by Primer3 rank (`Rank` column). Lets you pick a cleaner alternate when the top
+  pair carries a warning, without re-running.
 - **Internally consistent Tm** (reported under the same salt conditions used for
   design).
 - **Primer placement control** — choose where each primer lands relative to the

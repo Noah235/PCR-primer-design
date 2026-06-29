@@ -193,6 +193,7 @@ def main():  # pragma: no cover - interactive GUI
     min_prod_e = add_entry("Min Product", 2, 4, defaults.product_min)
     max_prod_e = add_entry("Max Product", 3, 0, defaults.product_max)
     gc_clamp_e = add_entry("GC Clamp", 3, 2, defaults.gc_clamp)
+    num_return_e = add_entry("Candidates", 6, 0, defaults.num_return)
     flank_label = tk.Label(param_frame, text="Flank (bp)")
     flank_label.grid(row=3, column=4)
     flank_e = tk.Entry(param_frame, width=6)

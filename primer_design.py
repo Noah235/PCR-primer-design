@@ -561,7 +561,12 @@ def in_silico_pcr(
                     (chrom, f_left, r_left + r_len, product, f_mm + r_mm)
                 )
 
-    return {"count": len(amplicons), "amplicons": amplicons}
+    max_mm = max((a[4] for a in amplicons), default=0)
+    return {
+        "count": len(amplicons),
+        "amplicons": amplicons,
+        "max_mismatches_observed": max_mm,
+    }
 
 
 def specificity_label(result: dict) -> str:
@@ -577,6 +582,8 @@ def specificity_label(result: dict) -> str:
         return result.get("error", "Invalid")
     if count == 0:
         return "No amplicons found"
+    mm = result.get("max_mismatches_observed", 0)
+    note = f", up to {mm} mismatch{'es' if mm != 1 else ''}" if mm else ""
     if count == 1:
         return "Specific (1 amplicon)"
     offtarget_mm = [a[4] for a in result.get("amplicons", []) if len(a) > 4 and a[4] > 0]
@@ -619,11 +626,13 @@ def _new_result(seq_id: str, placement: str) -> dict:
         "rev_tm": None,
         "rev_gc": None,
         "product_size": None,
+        "tm_diff": None,
         "fwd_hairpin_tm": None,
         "rev_hairpin_tm": None,
         "fwd_homodimer_tm": None,
         "rev_homodimer_tm": None,
         "heterodimer_tm": None,
+        "warnings": "",
         "status": "No suitable primers",
     }
 
@@ -703,6 +712,7 @@ def design_primer_candidates(
         )
         return [result]
 
+    n_return = max(1, max_candidates if max_candidates is not None else params.num_return)
     seq_args = {"SEQUENCE_ID": seq_id, "SEQUENCE_TEMPLATE": p3_seq}
     if fwd_region is not None or rev_region is not None:
         fl = fwd_region if fwd_region is not None else (-1, -1)
@@ -871,10 +881,10 @@ RESULT_COLUMNS = [
     "Gene Name", "Placement", "Rank",
     "Forward Primer", "Fwd Tm", "Fwd GC%",
     "Reverse Primer", "Rev Tm", "Rev GC%",
-    "Product Length",
+    "Product Length", "Tm Diff",
     "Fwd Hairpin Tm", "Rev Hairpin Tm",
     "Fwd SelfDimer Tm", "Rev SelfDimer Tm", "Hetero-dimer Tm",
-    "Specificity Check", "Status",
+    "Specificity Check", "Warnings", "Status",
 ]
 
 
@@ -886,10 +896,11 @@ def result_to_row(r: dict) -> list:
         r["gene"], r.get("placement", "internal"), r.get("rank", 0) + 1,
         s(r["forward"]), s(r["fwd_tm"]), s(r["fwd_gc"]),
         s(r["reverse"]), s(r["rev_tm"]), s(r["rev_gc"]),
-        s(r["product_size"]),
+        s(r["product_size"]), s(r.get("tm_diff")),
         s(r["fwd_hairpin_tm"]), s(r["rev_hairpin_tm"]),
         s(r["fwd_homodimer_tm"]), s(r["rev_homodimer_tm"]), s(r["heterodimer_tm"]),
         r.get("specificity", "Not tested"),
+        r.get("warnings", ""),
         r["status"],
     ]
 
@@ -904,4 +915,6 @@ def params_summary(params: PrimerParams, extra: str = "") -> str:
         f"Product {d['product_min']}-{d['product_max']}, "
         f"GC-clamp {d['gc_clamp']}, mv={d['thermo']['mv_conc']}mM"
     )
+    if d["num_return"] > 1:
+        base += f", candidates/template={d['num_return']}"
     return f"Parameters: {base}{(', ' + extra) if extra else ''}"
