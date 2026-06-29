@@ -144,6 +144,24 @@ def bench_candidates(templates, num_return):
     return t["elapsed"], pairs, len(templates)
 
 
+def bench_quality_ranking(templates, num_return):
+    """Design ``num_return`` pairs/template under default vs quality ranking.
+
+    The composite quality score is already computed for every candidate during
+    design (it folds in the Tm / GC / structure numbers), so quality re-ranking
+    is only an in-memory sort on top. This measures that the accuracy feature
+    adds no meaningful runtime over plain ranked alternates.
+    """
+    params = pd.PrimerParams(product_min=100, product_max=600, num_return=num_return)
+    with timer() as p3:
+        for i, tpl in enumerate(templates):
+            pd.design_primer_candidates(f"g{i}", tpl, params, rank_by="primer3")
+    with timer() as q:
+        for i, tpl in enumerate(templates):
+            pd.design_primer_candidates(f"g{i}", tpl, params, rank_by="quality")
+    return p3["elapsed"], q["elapsed"], len(templates)
+
+
 def bench_placement(genome_seq, genome, n_genes, gene_len=1000, flank=200):
     """Design every placement permutation (6 per gene) over n_genes."""
     rng = random.Random(7)
@@ -190,6 +208,9 @@ def main():
     cand1_t, _, _ = bench_candidates(templates, 1)
     candn_t, candn_pairs, candn_t_n = bench_candidates(templates, args.num_return)
 
+    print(f"Quality-ranking benchmark: primer3 vs quality over {args.genes} templates ...")
+    qp3_t, qq_t, q_n = bench_quality_ranking(templates, args.num_return)
+
     print(f"Placement benchmark: all permutations over {args.genes} genes ...")
     place_t, place_pairs, place_genes = bench_placement(genome_seq, genome, args.genes)
 
@@ -234,6 +255,17 @@ def main():
         f"Requesting {args.num_return} ranked pairs is one Primer3 call with a "
         "larger `PRIMER_NUM_RETURN`; the marginal cost is per-candidate Tm and "
         "secondary-structure scoring.",
+        "",
+        "## Quality re-ranking (primer3 order vs composite quality score)",
+        "",
+        "| Ranking | Templates | Total time | Per template |",
+        "| --- | ---: | ---: | ---: |",
+        f"| Primer3 default | {q_n} | {qp3_t:.3f} s | {qp3_t / q_n * 1000:.1f} ms |",
+        f"| Quality score | {q_n} | {qq_t:.3f} s | {qq_t / q_n * 1000:.1f} ms |",
+        "",
+        "The quality score is computed for every candidate during design, so "
+        "re-ranking by it is an in-memory sort — the accuracy feature adds no "
+        "meaningful runtime over plain ranked alternates.",
         "",
         "## Placement (all 6 permutations per gene)",
         "",

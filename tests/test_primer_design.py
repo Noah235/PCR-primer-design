@@ -510,5 +510,105 @@ def test_primer_warnings_tolerates_missing_values():
     assert pd.primer_warnings({"fwd_tm": None, "rev_tm": 60.0}) == []
 
 
+# --------------------------------------------------------------------------- #
+# Composite quality score + quality re-ranking
+# --------------------------------------------------------------------------- #
+def test_quality_score_clean_pair_is_high():
+    """A near-ideal pair (Tm == opt, balanced, 50% GC, no structure) scores ~100."""
+    clean = {
+        "forward": "ACGT", "reverse": "ACGT",
+        "fwd_tm": 60.0, "rev_tm": 60.0, "tm_diff": 0.0,
+        "fwd_gc": 50.0, "rev_gc": 50.0,
+        "fwd_hairpin_tm": 10.0, "rev_hairpin_tm": 10.0,
+        "fwd_homodimer_tm": 10.0, "rev_homodimer_tm": 10.0,
+        "heterodimer_tm": 10.0,
+    }
+    assert pd.quality_score(clean, pd.PrimerParams(opt_tm=60.0)) == 100.0
+
+
+def test_quality_score_penalises_problems():
+    """A pair with Tm imbalance and a stable hetero-dimer scores lower."""
+    good = {
+        "forward": "ACGT", "reverse": "ACGT",
+        "fwd_tm": 60.0, "rev_tm": 60.0, "tm_diff": 0.0,
+        "fwd_gc": 50.0, "rev_gc": 50.0,
+        "fwd_hairpin_tm": 10.0, "rev_hairpin_tm": 10.0,
+        "fwd_homodimer_tm": 10.0, "rev_homodimer_tm": 10.0,
+        "heterodimer_tm": 10.0,
+    }
+    bad = dict(good, fwd_tm=66.0, tm_diff=6.0, heterodimer_tm=55.0)
+    g = pd.quality_score(good, pd.PrimerParams(opt_tm=60.0))
+    b = pd.quality_score(bad, pd.PrimerParams(opt_tm=60.0))
+    assert b < g
+    assert 0.0 <= b <= 100.0
+
+
+def test_quality_score_none_for_failure_row():
+    """A result with no primer pair has no score (blank column)."""
+    assert pd.quality_score({"forward": None, "reverse": None}) is None
+    assert pd.quality_score(pd._new_result("g", "internal")) is None
+
+
+def test_quality_score_clamped_to_zero():
+    """A catastrophic pair never scores below zero."""
+    awful = {
+        "forward": "ACGT", "reverse": "ACGT",
+        "fwd_tm": 90.0, "rev_tm": 30.0, "tm_diff": 60.0,
+        "fwd_gc": 100.0, "rev_gc": 0.0,
+        "fwd_hairpin_tm": 80.0, "rev_hairpin_tm": 80.0,
+        "fwd_homodimer_tm": 80.0, "rev_homodimer_tm": 80.0,
+        "heterodimer_tm": 80.0,
+    }
+    assert pd.quality_score(awful, pd.PrimerParams(opt_tm=60.0)) == 0.0
+
+
+def test_designed_candidate_carries_quality_score():
+    """End-to-end: a designed OK pair has a numeric quality score in range."""
+    template = _random_seq(800, seed=42)
+    r = pd.design_primers_for_sequence("g", template,
+                                       pd.PrimerParams(product_min=100, product_max=400))
+    assert r["status"] == "OK"
+    assert isinstance(r["quality_score"], float)
+    assert 0.0 <= r["quality_score"] <= 100.0
+    # The score must appear in the flattened CSV row.
+    r["specificity"] = "Not tested"
+    row = pd.result_to_row(r)
+    assert len(row) == len(pd.RESULT_COLUMNS)
+    assert row[pd.RESULT_COLUMNS.index("Quality Score")] == r["quality_score"]
+
+
+def test_rank_by_quality_orders_by_score_desc():
+    """rank_by='quality' returns candidates sorted by descending quality score
+    with contiguous 0-based ranks; the same pairs, just reordered."""
+    template = _random_seq(1500, seed=11)
+    params = pd.PrimerParams(product_min=100, product_max=600, num_return=4)
+    default = pd.design_primer_candidates("g", template, params)
+    byq = pd.design_primer_candidates("g", template, params, rank_by="quality")
+    if len(byq) > 1:
+        scores = [c["quality_score"] for c in byq]
+        assert scores == sorted(scores, reverse=True)
+    assert [c["rank"] for c in byq] == list(range(len(byq)))
+    # Re-ranking is a permutation: identical set of primer pairs either way.
+    assert ({(c["forward"], c["reverse"]) for c in default}
+            == {(c["forward"], c["reverse"]) for c in byq})
+
+
+def test_rank_by_quality_can_promote_cleaner_pair():
+    """The rank-0 pair under quality ranking has the best score of the set."""
+    template = _random_seq(1500, seed=11)
+    params = pd.PrimerParams(product_min=100, product_max=600, num_return=5)
+    byq = pd.design_primer_candidates("g", template, params, rank_by="quality")
+    best = max(c["quality_score"] for c in byq)
+    assert byq[0]["quality_score"] == best
+
+
+def test_rank_by_invalid_raises():
+    template = _random_seq(800, seed=42)
+    with pytest.raises(ValueError):
+        pd.design_primer_candidates("g", template,
+                                    pd.PrimerParams(product_min=100, product_max=400),
+                                    rank_by="bogus")
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

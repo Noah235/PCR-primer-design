@@ -41,6 +41,10 @@ def _add_param_args(p):
     g.add_argument("--gc-clamp", type=int, default=d.gc_clamp)
     g.add_argument("--num-return", type=int, default=d.num_return,
                    help="ranked primer pairs to report per target (1 = best only)")
+    g.add_argument("--rank-by-quality", action="store_true",
+                   help="re-order candidates by the composite quality score "
+                        "(accounts for hairpin/dimer Tm) instead of Primer3's "
+                        "default ranking, so a cleaner pair can become rank 1")
 
 
 def _params_from_args(a) -> pd.PrimerParams:
@@ -92,10 +96,11 @@ def run_genome(a):
                  len(gene_list), placement)
 
     prepared_genome = pd.prepare_genome(genome) if a.specificity else None
+    rank_by = "quality" if a.rank_by_quality else "primer3"
     rows, n_ok = [], 0
     for gene in gene_list:
         for r in pd.design_for_gene(genome, gene, params, a.flank, mode=placement,
-                                    num_candidates=params.num_return):
+                                    num_candidates=params.num_return, rank_by=rank_by):
             if a.specificity and r["status"] == "OK":
                 max_prod = max(params.product_max, (r["product_size"] or 0) + 500)
                 spec = pd.in_silico_pcr(r["forward"], r["reverse"], prepared_genome,
@@ -135,10 +140,12 @@ def run_cds(a):
         sys.exit("No CDS to process.")
     logging.info("Designing primers for %d CDS...", len(cds))
 
+    rank_by = "quality" if a.rank_by_quality else "primer3"
     rows, n_ok = [], 0
     for name, info in cds.items():
         for r in pd.design_primer_candidates(name, info["sequence"], params,
-                                             num_candidates=params.num_return):
+                                             num_candidates=params.num_return,
+                                             rank_by=rank_by):
             r["specificity"] = "N/A (CDS mode)"
             n_ok += r["status"] == "OK"
             rows.append(pd.result_to_row(r))

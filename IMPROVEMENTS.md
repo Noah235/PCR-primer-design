@@ -7,7 +7,34 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 
 ## ✅ Done in this iteration (latest)
 
-### Accuracy — off-target mismatch reporting (NEW)
+### Accuracy + ease of use — composite quality score & quality re-ranking (NEW)
+- **One 0–100 score per pair, and the option to rank by it.** `quality_score()`
+  folds the numbers a bench scientist would otherwise weigh by eye — each
+  primer's Tm deviation from `opt_tm`, the pair Tm difference, GC distance from
+  50 %, and how stable the hairpin / self-dimer / hetero-dimer structures are
+  *relative to the annealing temperature* — into a single figure where higher is
+  better (structures that melt out well before annealing are not penalised).
+  Surfaced as a new `Quality Score` CSV column and computed for **every**
+  candidate during design (no extra Primer3 calls).
+- **`rank_by="quality"`** (CLI `--rank-by-quality`, GUI *Rank by quality score*)
+  re-orders the alternates by this score so a structurally cleaner pair can be
+  promoted to rank 1 ahead of Primer3's default ordering — which does **not**
+  factor in the hairpin/dimer Tm values we compute. Default ordering is
+  unchanged (`rank_by="primer3"`), so existing output is bit-for-bit stable.
+  Threaded through `design_primer_candidates`, `design_primers_for_sequence`,
+  `design_for_gene`, the CLI and the GUI. Regression-guarded (8 new tests:
+  clean-pair=100, monotonic penalties, `None` for failure rows, clamp-at-0,
+  end-to-end score in the CSV row, quality ordering is a sorted permutation,
+  rank-0 carries the best score, invalid `rank_by` raises) and benchmarked (new
+  "Quality re-ranking" section: re-ranking is an in-memory sort, **0 % runtime
+  overhead** vs plain ranked alternates — 10.9 vs 11.0 ms/template).
+
+### Ease of use — GUI dead-widget fix (NEW)
+- The GUI created the *Candidates* / *Primers per target* number entry **twice**
+  (`num_return_e` was assigned over itself); the first widget was orphaned and
+  never read. Removed the duplicate so the visible field is the one actually used.
+
+### Accuracy — off-target mismatch reporting
 - **Each predicted amplicon now carries its mismatch count.** `in_silico_pcr()`
   amplicons are `(chrom, start, end, size, mismatches)`; the intended product is
   0 mismatches and off-targets are ≥1 in mismatch-tolerant mode.
@@ -18,7 +45,7 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
   (`test_specificity_label_reports_offtarget_mismatches`,
   `test_in_silico_pcr_amplicon_carries_mismatch_count`).
 
-### Accuracy bug fix — amplicon enumeration early-break (NEW)
+### Accuracy bug fix — amplicon enumeration early-break
 - The amplicon search sorted reverse binding sites by position and `break`-ed on
   the first product over `max_product`. When the two primers differ in length a
   later, longer-footprint site could still be in-window, so a valid (often
@@ -28,7 +55,7 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
   (`test_in_silico_pcr_unequal_primer_lengths_large_product`); benchmarked — no
   speed regression (specificity path unchanged within noise).
 
-### Ease of use + accuracy — ranked alternate primer pairs (NEW)
+### Ease of use + accuracy — ranked alternate primer pairs
 - **Report the top *N* primer pairs per target, not just the single best.**
   `PrimerParams.num_return` is now honoured end-to-end: `design_primer_candidates()`
   returns ranked results (rank 0 = best), `design_for_gene()` takes
@@ -147,10 +174,13 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 3. **Run design off the main thread.** For large gene sets the Tkinter GUI
    freezes during a run; move the pipeline to a worker thread with a progress
    queue.
-4. **Rank/score the alternates.** Ranked alternates are now emitted (done — see
-   above); a natural follow-up is a composite quality score per pair (penalising
-   hairpin/dimer Tm near the annealing temp, GC/Tm imbalance) to re-rank or flag
-   risky candidates beyond Primer3's default ordering.
+4. **Rank/score the alternates.** ✅ *Done* — a composite 0–100 `quality_score()`
+   (Tm match/balance, GC, hairpin/dimer Tm relative to the annealing temp) is now
+   computed per pair and reported in a `Quality Score` column, and
+   `rank_by="quality"` (`--rank-by-quality`) re-ranks the alternates by it beyond
+   Primer3's default ordering. Natural follow-ups: expose the penalty weights /
+   structure margin as tunables, and let a low score demote or flag a candidate
+   automatically (ties into the warning thresholds below).
 
 ## 💡 Nice to have
 - **Expose warning thresholds** (`WARN_MAX_TM_DIFF`, `WARN_HAIRPIN_TM`,

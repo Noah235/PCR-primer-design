@@ -26,6 +26,13 @@ GUI** or a **headless CLI**, with all logic in an importable, tested core module
   reports the **nearest off-target's mismatch count**, so a pair that only
   mis-primes at distant (high-mismatch) sites is distinguishable from one with a
   perfect-match off-target.
+- **Composite quality score (0–100)** per pair — a single `Quality Score` column
+  folds Tm match to the protocol, Tm balance between the two primers, GC, and how
+  stable the hairpin/self-dimer/hetero-dimer structures are relative to the
+  annealing temperature into one number (higher is better). Optionally **re-rank
+  the alternates by it** (`--rank-by-quality` / GUI *Rank by quality score*) so a
+  structurally cleaner pair is promoted ahead of Primer3's default ordering,
+  which does not see the secondary-structure Tm values.
 - **Secondary-structure reporting** per primer: hairpin Tm, self-dimer Tm, and
   primer-pair hetero-dimer Tm — so you can spot primers likely to fail.
 - **At-a-glance quality warnings** — a `Warnings` column flags the actual
@@ -104,6 +111,10 @@ python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \
 python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \
     --num-return 3 -o ranked_primers.csv
 
+# Re-rank those 3 alternates by composite quality score (promotes the cleanest pair)
+python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \
+    --num-return 3 --rank-by-quality -o ranked_primers.csv
+
 python primer_cli.py genome --help    # full parameter list
 ```
 
@@ -129,8 +140,12 @@ spec = pd.in_silico_pcr(result["forward"], result["reverse"], genome,
 ## Output (CSV columns)
 
 Gene name · Placement · Rank · Forward/Reverse primer · Tm · GC% · Product length ·
-Hairpin Tm (F/R) · Self-dimer Tm (F/R) · Hetero-dimer Tm ·
-Specificity check · Status.
+Hairpin Tm (F/R) · Self-dimer Tm (F/R) · Hetero-dimer Tm · Quality Score ·
+Specificity check · Warnings · Status.
+
+The **Quality Score** column is a 0–100 composite (higher is better) summarising
+Tm match/balance, GC and secondary-structure stability; with `--rank-by-quality`
+the `Rank` column is ordered by it.
 
 The **Placement** column records where the pair was designed (e.g.
 `internal->internal`, `upstream->downstream`). With `--placement all` you get one
