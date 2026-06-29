@@ -595,6 +595,50 @@ def specificity_label(result: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Quality warnings
+# --------------------------------------------------------------------------- #
+# Heuristic thresholds for flagging a primer pair that is likely to amplify
+# poorly. Secondary-structure Tm values near the annealing temperature mean the
+# structure competes with template binding; a large Tm difference between the
+# two primers means one anneals far better than the other at a single cycling
+# temperature. These are screening defaults, not hard limits.
+WARN_MAX_TM_DIFF = 5.0        # °C; mismatched pair Tm hurts co-amplification
+WARN_HAIRPIN_TM = 45.0        # °C; hairpin stable near typical annealing temps
+WARN_DIMER_TM = 45.0          # °C; self-/hetero-dimer stable near annealing
+
+
+def primer_warnings(
+    result: dict,
+    *,
+    max_tm_diff: float = WARN_MAX_TM_DIFF,
+    hairpin_tm: float = WARN_HAIRPIN_TM,
+    dimer_tm: float = WARN_DIMER_TM,
+) -> List[str]:
+    """Return human-readable risk warnings for a design ``result`` (maybe empty).
+
+    Surfaces the secondary-structure / Tm-balance problems that are otherwise
+    buried in the numeric columns, so a user can see *at a glance* why a primer
+    pair might fail rather than having to interpret six Tm numbers themselves.
+    """
+    warns: List[str] = []
+    ft, rt = result.get("fwd_tm"), result.get("rev_tm")
+    if ft is not None and rt is not None and abs(ft - rt) > max_tm_diff:
+        warns.append(f"ΔTm {abs(ft - rt):.1f}°C")
+    for label, key in (("fwd hairpin", "fwd_hairpin_tm"),
+                       ("rev hairpin", "rev_hairpin_tm")):
+        v = result.get(key)
+        if v is not None and v > hairpin_tm:
+            warns.append(f"high {label} ({v:.0f}°C)")
+    for label, key in (("fwd self-dimer", "fwd_homodimer_tm"),
+                       ("rev self-dimer", "rev_homodimer_tm"),
+                       ("hetero-dimer", "heterodimer_tm")):
+        v = result.get(key)
+        if v is not None and v > dimer_tm:
+            warns.append(f"high {label} ({v:.0f}°C)")
+    return warns
+
+
+# --------------------------------------------------------------------------- #
 # Primer design
 # --------------------------------------------------------------------------- #
 # Named regions of a gene template, ordered 5' -> 3'.
@@ -648,16 +692,19 @@ def _build_candidate(
     result = _new_result(seq_id, placement)
     fwd_struct = analyze_oligo(fwd, thermo)
     rev_struct = analyze_oligo(rev, thermo)
+    fwd_tm, rev_tm = calc_tm(fwd, thermo), calc_tm(rev, thermo)
     result.update(
         {
             "rank": idx,
             "forward": fwd,
             "reverse": rev,
-            "fwd_tm": calc_tm(fwd, thermo),
+            "fwd_tm": fwd_tm,
             "fwd_gc": calc_gc(fwd),
-            "rev_tm": calc_tm(rev, thermo),
+            "rev_tm": rev_tm,
             "rev_gc": calc_gc(rev),
             "product_size": primers.get(f"PRIMER_PAIR_{idx}_PRODUCT_SIZE"),
+            "tm_diff": (round(abs(fwd_tm - rev_tm), 2)
+                        if fwd_tm is not None and rev_tm is not None else None),
             "fwd_hairpin_tm": fwd_struct["hairpin_tm"],
             "rev_hairpin_tm": rev_struct["hairpin_tm"],
             "fwd_homodimer_tm": fwd_struct["homodimer_tm"],
@@ -666,6 +713,7 @@ def _build_candidate(
             "status": "OK",
         }
     )
+    result["warnings"] = "; ".join(primer_warnings(result))
     return result
 
 
@@ -678,13 +726,16 @@ def design_primer_candidates(
     rev_region: Optional[Tuple[int, int]] = None,
     product_range: Optional[Tuple[int, int]] = None,
     placement: str = "internal",
-    num_candidates: int = 1,
+    num_candidates: Optional[int] = None,
 ) -> List[dict]:
     """Design up to ``num_candidates`` ranked primer pairs for one template.
 
-    Returns a list of result dicts ordered best-first (``rank`` 0 is Primer3's
-    top pair). Offering ranked alternates lets a user fall back to the 2nd/3rd
-    pair when the best one fails at the bench, without re-running the pipeline.
+    ``num_candidates`` defaults to ``params.num_return`` when not given, so the
+    caller can drive the count purely through the parameters object or override
+    it per call. Returns a list of result dicts ordered best-first (``rank`` 0
+    is Primer3's top pair). Offering ranked alternates lets a user fall back to
+    the 2nd/3rd pair when the best one fails at the bench, without re-running
+    the pipeline.
 
     Optional ``fwd_region`` / ``rev_region`` are ``(start, length)`` windows
     (in template coordinates) constraining where the left / right primer may be
@@ -696,7 +747,7 @@ def design_primer_candidates(
     Always returns at least one dict (a failure result when nothing fits) and
     never raises.
     """
-    n = max(1, int(num_candidates))
+    n = max(1, int(num_candidates if num_candidates is not None else params.num_return))
     p3_seq = _p3_template(template)
     clean_len = len(clean_sequence(template))
     result = _new_result(seq_id, placement)
@@ -712,7 +763,6 @@ def design_primer_candidates(
         )
         return [result]
 
-    n_return = max(1, max_candidates if max_candidates is not None else params.num_return)
     seq_args = {"SEQUENCE_ID": seq_id, "SEQUENCE_TEMPLATE": p3_seq}
     if fwd_region is not None or rev_region is not None:
         fl = fwd_region if fwd_region is not None else (-1, -1)
@@ -827,14 +877,14 @@ def placement_combos(mode) -> List[Tuple[str, str]]:
 
 def design_for_gene(
     genome: Dict, gene: dict, params: PrimerParams, flank_size: int, mode="internal",
-    *, num_candidates: int = 1,
+    *, num_candidates: Optional[int] = None,
 ) -> List[dict]:
     """Design primers for one gene under one or more placement modes.
 
-    Returns one result dict per requested placement (or ``num_candidates`` rows
-    per placement when ranked alternates are requested). For ``mode="internal"``
-    with no flanks and ``num_candidates=1`` this is a single internal design
-    (back-compatible).
+    Returns one result dict per requested placement (or up to ``num_candidates``
+    ranked rows per placement). ``num_candidates`` defaults to
+    ``params.num_return``. For ``mode="internal"`` with no flanks and a single
+    requested candidate this is one internal design (back-compatible).
     """
     name = gene["gene_name"] or gene["locus_tag"]
     combos = placement_combos(mode)
