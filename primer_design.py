@@ -639,6 +639,76 @@ def primer_warnings(
 
 
 # --------------------------------------------------------------------------- #
+# Composite quality score
+# --------------------------------------------------------------------------- #
+# Per-unit penalties subtracted from a perfect score of 100. The score folds the
+# numbers a bench scientist would otherwise have to weigh by eye (Tm match, Tm
+# balance, GC, and how stable the secondary structures are relative to the
+# annealing temperature) into a single 0–100 figure where higher is better. It
+# lets a user re-rank the alternates so a cleaner pair is preferred over
+# Primer3's default ordering (which does not see the structure Tm values we
+# compute here).
+QUALITY_TM_DEV_PENALTY = 1.5      # per °C either primer's Tm is from opt_tm
+QUALITY_TM_DIFF_PENALTY = 2.0     # per °C Tm difference between the two primers
+QUALITY_GC_DEV_PENALTY = 0.4      # per % each primer's GC is from the 50% ideal
+QUALITY_HAIRPIN_PENALTY = 1.2     # per °C a hairpin Tm exceeds the free margin
+QUALITY_DIMER_PENALTY = 1.2       # per °C a self-dimer Tm exceeds the margin
+QUALITY_HETERODIMER_PENALTY = 1.6  # per °C the hetero-dimer Tm exceeds the margin
+# A secondary structure whose Tm is this far *below* the annealing temperature
+# has melted out before the primers anneal and is treated as harmless; only the
+# excess above (annealing_tm - margin) is penalised.
+QUALITY_STRUCT_FREE_MARGIN = 20.0  # °C below annealing temp considered harmless
+
+
+def quality_score(result: dict, params: Optional[PrimerParams] = None) -> Optional[float]:
+    """Composite 0–100 quality score for a designed pair (higher == better).
+
+    Returns ``None`` when the result has no primer pair (a failure row) so the
+    caller can leave the column blank. The score starts at 100 and subtracts
+    penalties for:
+
+    * each primer's Tm deviating from ``opt_tm`` (poor match to the protocol),
+    * the Tm difference between the two primers (they co-cycle at one temp),
+    * each primer's GC% deviating from the 50% ideal,
+    * hairpin / self-dimer / hetero-dimer Tm that is stable near the annealing
+      temperature (these compete with template binding and cause dropouts).
+
+    Structures whose Tm is well below the annealing temperature (by more than
+    ``QUALITY_STRUCT_FREE_MARGIN``) have already melted when the primers anneal
+    and are not penalised. The score is a screening heuristic, not a guarantee.
+    """
+    if not result.get("forward") or not result.get("reverse"):
+        return None
+    params = params or PrimerParams()
+    opt_tm = params.opt_tm
+    anneal_tm = opt_tm - 5.0          # typical annealing ≈ opt Tm − 5 °C
+    struct_ceiling = anneal_tm - QUALITY_STRUCT_FREE_MARGIN
+
+    penalty = 0.0
+    for key in ("fwd_tm", "rev_tm"):
+        tm = result.get(key)
+        if tm is not None:
+            penalty += QUALITY_TM_DEV_PENALTY * abs(tm - opt_tm)
+    diff = result.get("tm_diff")
+    if diff is not None:
+        penalty += QUALITY_TM_DIFF_PENALTY * diff
+    for key in ("fwd_gc", "rev_gc"):
+        gc = result.get(key)
+        if gc is not None:
+            penalty += QUALITY_GC_DEV_PENALTY * abs(gc - 50.0)
+    for key, weight in (("fwd_hairpin_tm", QUALITY_HAIRPIN_PENALTY),
+                        ("rev_hairpin_tm", QUALITY_HAIRPIN_PENALTY),
+                        ("fwd_homodimer_tm", QUALITY_DIMER_PENALTY),
+                        ("rev_homodimer_tm", QUALITY_DIMER_PENALTY),
+                        ("heterodimer_tm", QUALITY_HETERODIMER_PENALTY)):
+        tm = result.get(key)
+        if tm is not None and tm > struct_ceiling:
+            penalty += weight * (tm - struct_ceiling)
+
+    return round(max(0.0, 100.0 - penalty), 1)
+
+
+# --------------------------------------------------------------------------- #
 # Primer design
 # --------------------------------------------------------------------------- #
 # Named regions of a gene template, ordered 5' -> 3'.
@@ -676,19 +746,21 @@ def _new_result(seq_id: str, placement: str) -> dict:
         "fwd_homodimer_tm": None,
         "rev_homodimer_tm": None,
         "heterodimer_tm": None,
+        "quality_score": None,
         "warnings": "",
         "status": "No suitable primers",
     }
 
 
 def _build_candidate(
-    seq_id: str, placement: str, primers: dict, idx: int, thermo: "ThermoParams"
+    seq_id: str, placement: str, primers: dict, idx: int, params: "PrimerParams"
 ) -> Optional[dict]:
     """Build a result dict for the ``idx``-th primer pair, or ``None`` if absent."""
     fwd = primers.get(f"PRIMER_LEFT_{idx}_SEQUENCE")
     rev = primers.get(f"PRIMER_RIGHT_{idx}_SEQUENCE")
     if not fwd or not rev:
         return None
+    thermo = params.thermo
     result = _new_result(seq_id, placement)
     fwd_struct = analyze_oligo(fwd, thermo)
     rev_struct = analyze_oligo(rev, thermo)
@@ -713,6 +785,7 @@ def _build_candidate(
             "status": "OK",
         }
     )
+    result["quality_score"] = quality_score(result, params)
     result["warnings"] = "; ".join(primer_warnings(result))
     return result
 
@@ -727,15 +800,27 @@ def design_primer_candidates(
     product_range: Optional[Tuple[int, int]] = None,
     placement: str = "internal",
     num_candidates: Optional[int] = None,
+    rank_by: str = "primer3",
 ) -> List[dict]:
     """Design up to ``num_candidates`` ranked primer pairs for one template.
 
     ``num_candidates`` defaults to ``params.num_return`` when not given, so the
     caller can drive the count purely through the parameters object or override
     it per call. Returns a list of result dicts ordered best-first (``rank`` 0
-    is Primer3's top pair). Offering ranked alternates lets a user fall back to
+    is the top pair). Offering ranked alternates lets a user fall back to
     the 2nd/3rd pair when the best one fails at the bench, without re-running
     the pipeline.
+
+    ``rank_by`` controls the ordering of the returned candidates:
+
+    * ``"primer3"`` (default) — keep Primer3's own penalty-based ranking;
+    * ``"quality"`` — re-order by the composite :func:`quality_score`
+      (descending), which additionally accounts for the hairpin / dimer Tm
+      values Primer3 does not factor into its default ordering, so a cleaner
+      alternate can be promoted to rank 0. Ties keep Primer3's relative order.
+
+    Either way every candidate carries its ``quality_score``; only the order and
+    the ``rank`` index change.
 
     Optional ``fwd_region`` / ``rev_region`` are ``(start, length)`` windows
     (in template coordinates) constraining where the left / right primer may be
@@ -783,7 +868,7 @@ def design_primer_candidates(
 
     candidates: List[dict] = []
     for idx in range(n):
-        cand = _build_candidate(seq_id, placement, primers, idx, params.thermo)
+        cand = _build_candidate(seq_id, placement, primers, idx, params)
         if cand is None:
             break
         candidates.append(cand)
@@ -793,6 +878,14 @@ def design_primer_candidates(
         if explain:
             result["status"] = f"No suitable primers ({explain})"
         return [result]
+
+    if rank_by == "quality":
+        # Stable sort by score desc keeps Primer3's order among equal scores.
+        candidates.sort(key=lambda c: -(c.get("quality_score") or 0.0))
+    elif rank_by != "primer3":
+        raise ValueError(f"Unknown rank_by: {rank_by!r} (use 'primer3' or 'quality')")
+    for new_rank, cand in enumerate(candidates):
+        cand["rank"] = new_rank
     return candidates
 
 
@@ -805,6 +898,7 @@ def design_primers_for_sequence(
     rev_region: Optional[Tuple[int, int]] = None,
     product_range: Optional[Tuple[int, int]] = None,
     placement: str = "internal",
+    rank_by: str = "primer3",
 ) -> dict:
     """Design a single best primer pair for one template (back-compatible).
 
@@ -815,7 +909,7 @@ def design_primers_for_sequence(
         seq_id, template, params,
         fwd_region=fwd_region, rev_region=rev_region,
         product_range=product_range, placement=placement,
-        num_candidates=1,
+        num_candidates=1, rank_by=rank_by,
     )[0]
 
 
@@ -877,7 +971,7 @@ def placement_combos(mode) -> List[Tuple[str, str]]:
 
 def design_for_gene(
     genome: Dict, gene: dict, params: PrimerParams, flank_size: int, mode="internal",
-    *, num_candidates: Optional[int] = None,
+    *, num_candidates: Optional[int] = None, rank_by: str = "primer3",
 ) -> List[dict]:
     """Design primers for one gene under one or more placement modes.
 
@@ -920,7 +1014,7 @@ def design_for_gene(
                 name, template, params,
                 fwd_region=freg, rev_region=rreg,
                 product_range=product_range, placement=label,
-                num_candidates=num_candidates,
+                num_candidates=num_candidates, rank_by=rank_by,
             )
         )
     return results
@@ -934,6 +1028,7 @@ RESULT_COLUMNS = [
     "Product Length", "Tm Diff",
     "Fwd Hairpin Tm", "Rev Hairpin Tm",
     "Fwd SelfDimer Tm", "Rev SelfDimer Tm", "Hetero-dimer Tm",
+    "Quality Score",
     "Specificity Check", "Warnings", "Status",
 ]
 
@@ -949,6 +1044,7 @@ def result_to_row(r: dict) -> list:
         s(r["product_size"]), s(r.get("tm_diff")),
         s(r["fwd_hairpin_tm"]), s(r["rev_hairpin_tm"]),
         s(r["fwd_homodimer_tm"]), s(r["rev_homodimer_tm"]), s(r["heterodimer_tm"]),
+        s(r.get("quality_score")),
         r.get("specificity", "Not tested"),
         r.get("warnings", ""),
         r["status"],

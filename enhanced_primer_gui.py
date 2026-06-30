@@ -14,7 +14,7 @@ import primer_design as pd
 
 def _run_genome_gff(params, output_csv, genome_path, gff_path, target_names,
                     flank_size, do_specificity, log, placement="internal",
-                    seed_len=0, max_mismatches=0):
+                    seed_len=0, max_mismatches=0, rank_by="primer3"):
     """Genome FASTA + GFF3 pipeline. ``log`` is a callable(str)."""
     genome = pd.load_genome(genome_path)
     log("Genome loaded")
@@ -48,7 +48,7 @@ def _run_genome_gff(params, output_csv, genome_path, gff_path, target_names,
             if i % 10 == 0:
                 log(f"Processing gene {i + 1}/{len(gene_list)}...")
             for r in pd.design_for_gene(genome, gene, params, flank_size, mode=placement,
-                                        num_candidates=params.num_return):
+                                        num_candidates=params.num_return, rank_by=rank_by):
                 if do_specificity and r["status"] == "OK":
                     # Window generous enough to include this pair's own amplicon.
                     max_prod = max(params.product_max, (r["product_size"] or 0) + 500)
@@ -69,7 +69,7 @@ def _run_genome_gff(params, output_csv, genome_path, gff_path, target_names,
     return n_ok, len(gene_list)
 
 
-def _run_cds(params, output_csv, cds_path, target_names, log):
+def _run_cds(params, output_csv, cds_path, target_names, log, rank_by="primer3"):
     """CDS-FASTA-only pipeline."""
     all_cds = pd.load_cds_sequences(cds_path)
     log(f"Loaded {len(all_cds)} CDS sequences")
@@ -98,7 +98,8 @@ def _run_cds(params, output_csv, cds_path, target_names, log):
             if i % 10 == 0:
                 log(f"Processing CDS {i + 1}/{len(filtered)}...")
             for r in pd.design_primer_candidates(name, info["sequence"], params,
-                                                 num_candidates=params.num_return):
+                                                 num_candidates=params.num_return,
+                                                 rank_by=rank_by):
                 r["specificity"] = "N/A (CDS mode)"
                 if r["status"] == "OK":
                     n_ok += 1
@@ -193,7 +194,6 @@ def main():  # pragma: no cover - interactive GUI
     min_prod_e = add_entry("Min Product", 2, 4, defaults.product_min)
     max_prod_e = add_entry("Max Product", 3, 0, defaults.product_max)
     gc_clamp_e = add_entry("GC Clamp", 3, 2, defaults.gc_clamp)
-    num_return_e = add_entry("Candidates", 6, 0, defaults.num_return)
     flank_label = tk.Label(param_frame, text="Flank (bp)")
     flank_label.grid(row=3, column=4)
     flank_e = tk.Entry(param_frame, width=6)
@@ -203,6 +203,12 @@ def main():  # pragma: no cover - interactive GUI
     check_specificity = tk.BooleanVar(value=True)
     tk.Checkbutton(param_frame, text="Test primer specificity",
                    variable=check_specificity).grid(row=4, column=0, columnspan=2, sticky="w")
+
+    # Re-rank the alternates by the composite quality score instead of Primer3's
+    # default ordering (only changes which alternate is rank 1).
+    rank_by_quality = tk.BooleanVar(value=False)
+    tk.Checkbutton(param_frame, text="Rank by quality score",
+                   variable=rank_by_quality).grid(row=6, column=0, columnspan=2, sticky="w")
 
     # Mismatch-tolerant specificity controls (seed_len=0 -> exact match).
     seed_len_e = add_entry("3' seed (0=exact)", 5, 0, 0)
@@ -278,6 +284,7 @@ def main():  # pragma: no cover - interactive GUI
         results_text.delete("1.0", tk.END)
         log("Starting primer design...")
         target_names = gene_filter_text.get("1.0", tk.END)
+        rank_by = "quality" if rank_by_quality.get() else "primer3"
         try:
             if mode_var.get() == "genome_gff":
                 if not genome_entry.get() or not gff_entry.get():
@@ -287,12 +294,14 @@ def main():  # pragma: no cover - interactive GUI
                                 target_names, int(flank_e.get()), check_specificity.get(), log,
                                 placement=placement_choices[placement_var.get()],
                                 seed_len=int(seed_len_e.get() or 0),
-                                max_mismatches=int(max_mm_e.get() or 0))
+                                max_mismatches=int(max_mm_e.get() or 0),
+                                rank_by=rank_by)
             else:
                 if not cds_entry.get():
                     messagebox.showerror("Error", "Select a CDS FASTA file.")
                     return
-                _run_cds(params, output_csv, cds_entry.get(), target_names, log)
+                _run_cds(params, output_csv, cds_entry.get(), target_names, log,
+                         rank_by=rank_by)
         except Exception as exc:
             messagebox.showerror("Pipeline failed", str(exc))
             log(f"ERROR: {exc}")
