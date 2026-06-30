@@ -67,6 +67,10 @@ pip install -r requirements.txt
 conda env create -f environment.yml && conda activate pcr-primer-design
 ```
 
+FASTA inputs are read with a tolerant loader, so files that carry blank or `;`
+comment lines before the first record (rejected by Biopython ≥ 1.85's strict
+`fasta` parser) still load.
+
 Requires Python 3.9+, `biopython` and `primer3-py`. The GUI additionally needs
 `tkinter` (bundled with most Python installs; on Debian/Ubuntu:
 `sudo apt install python3-tk`). The CLI and core library do **not** need tkinter.

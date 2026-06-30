@@ -162,6 +162,45 @@ def bench_quality_ranking(templates, num_return):
     return p3["elapsed"], q["elapsed"], len(templates)
 
 
+def bench_fasta_loading(genome_seq, n_records=200, reps=5):
+    """Compare the strict fast-path load vs the lenient fallback.
+
+    The tolerant loader (``read_fasta_records``) tries Biopython's strict
+    ``"fasta"`` parser first and only falls back to stripping comments when that
+    raises. This measures that the common (clean-file) case keeps the strict
+    parser's speed, and how much the comment-stripping fallback costs when a file
+    genuinely needs it (e.g. leading ``;`` comments, which crash the strict
+    parser on Biopython >= 1.85).
+    """
+    rng = random.Random(5)
+    recs = []
+    for i in range(n_records):
+        start = rng.randint(0, len(genome_seq) - 2000)
+        recs.append(SeqRecord(Seq(genome_seq[start:start + 1500]), id=f"c{i}",
+                              description=""))
+    clean_path = "_bench_clean.fasta"
+    commented_path = "_bench_commented.fasta"
+    SeqIO.write(recs, clean_path, "fasta")
+    with open(clean_path) as fh:
+        body = fh.read()
+    # A leading ';' comment block that the strict parser rejects -> forces the
+    # lenient fallback path.
+    with open(commented_path, "w") as fh:
+        fh.write("; benchmark genome with a leading comment block\n;\n\n" + body)
+
+    with timer() as fast:
+        for _ in range(reps):
+            pd.read_fasta_records(clean_path)
+    with timer() as fallback:
+        for _ in range(reps):
+            pd.read_fasta_records(commented_path)
+
+    import os
+    os.remove(clean_path)
+    os.remove(commented_path)
+    return fast["elapsed"] / reps, fallback["elapsed"] / reps, n_records
+
+
 def bench_placement(genome_seq, genome, n_genes, gene_len=1000, flank=200):
     """Design every placement permutation (6 per gene) over n_genes."""
     rng = random.Random(7)
@@ -210,6 +249,9 @@ def main():
 
     print(f"Quality-ranking benchmark: primer3 vs quality over {args.genes} templates ...")
     qp3_t, qq_t, q_n = bench_quality_ranking(templates, args.num_return)
+
+    print("FASTA-loading benchmark: strict fast path vs lenient fallback ...")
+    load_fast_t, load_fallback_t, load_recs = bench_fasta_loading(genome_seq)
 
     print(f"Placement benchmark: all permutations over {args.genes} genes ...")
     place_t, place_pairs, place_genes = bench_placement(genome_seq, genome, args.genes)
@@ -266,6 +308,20 @@ def main():
         "The quality score is computed for every candidate during design, so "
         "re-ranking by it is an in-memory sort — the accuracy feature adds no "
         "meaningful runtime over plain ranked alternates.",
+        "",
+        "## FASTA loading (tolerant reader)",
+        "",
+        "| Path | Records | Per load |",
+        "| --- | ---: | ---: |",
+        f"| Strict fast path (clean file) | {load_recs} | "
+        f"{load_fast_t * 1000:.1f} ms |",
+        f"| Lenient fallback (leading ';' comments) | {load_recs} | "
+        f"{load_fallback_t * 1000:.1f} ms |",
+        "",
+        "The tolerant loader tries Biopython's strict `\"fasta\"` parser first, so "
+        "clean files keep its speed. The fallback (comment stripping + reparse) "
+        "only runs for files that would otherwise crash the strict parser on "
+        "Biopython >= 1.85, and reads the file once more in memory.",
         "",
         "## Placement (all 6 permutations per gene)",
         "",

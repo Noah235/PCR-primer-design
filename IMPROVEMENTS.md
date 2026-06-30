@@ -7,7 +7,35 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 
 ## ✅ Done in this iteration (latest)
 
-### Accuracy + ease of use — composite quality score & quality re-ranking (NEW)
+### Bug fix (ease of use + accuracy) — tolerant FASTA loading (NEW)
+- **Real genome / CDS FASTAs crashed the loader on current Biopython.**
+  Biopython **>= 1.85** made the default `"fasta"` parser *strict*: it now
+  raises on any file that has blank or `;`-comment lines **before the first
+  record** (and on `;` comment lines anywhere). Such lines are common in
+  real-world FASTAs (and the Pearson/BLAST FASTA dialects allow them), so
+  `load_genome()` / `load_cds_sequences()` — which both called
+  `SeqIO.parse(path, "fasta")` — failed with an opaque multi-paragraph
+  Biopython traceback on input that loaded fine on older Biopython. The whole
+  genome+GFF3 pipeline (CLI **and** GUI) was unusable on those files.
+- **Fix:** a new `read_fasta_records()` tries the fast strict parser first and,
+  only when it raises, falls back to stripping the offending leading/comment
+  lines (`_strip_leading_fasta_comments()`) and re-parsing the cleaned text.
+  This is version-agnostic (no dependency on the new `fasta-pearson` /
+  `fasta-blast` format names, which don't exist on Biopython 1.80–1.84) and
+  both loaders now route through it. Empty/headerless files now surface the
+  clear `No sequences found in FASTA file` message instead of the strict
+  parser's traceback.
+- **Regression-guarded** (5 new tests: leading-comment genome loads, clean
+  multi-record file still loads via the fast path, empty file → clear error,
+  CDS leading-blank + inline `;` comment loads, `_strip_leading_fasta_comments`
+  unit). **Benchmarked** (new "FASTA loading" section): the strict fast path is
+  unchanged for clean files (~1.5 ms / 200 records) and the fallback (~3.2 ms)
+  only runs for files that would otherwise crash — **no overhead on the common
+  path**. Verified end-to-end: the full `genome` CLI pipeline (specificity +
+  ranked alternates) now completes on a FASTA with a leading comment block that
+  previously aborted before any primer was designed.
+
+### Accuracy + ease of use — composite quality score & quality re-ranking
 - **One 0–100 score per pair, and the option to rank by it.** `quality_score()`
   folds the numbers a bench scientist would otherwise weigh by eye — each
   primer's Tm deviation from `opt_tm`, the pair Tm difference, GC distance from
