@@ -14,8 +14,14 @@ import primer_design as pd
 
 def _run_genome_gff(params, output_csv, genome_path, gff_path, target_names,
                     flank_size, do_specificity, log, placement="internal",
-                    seed_len=0, max_mismatches=0, rank_by="primer3"):
-    """Genome FASTA + GFF3 pipeline. ``log`` is a callable(str)."""
+                    seed_len=0, max_mismatches=0, rank_by="primer3",
+                    bed_path=None):
+    """Genome FASTA + GFF3 pipeline. ``log`` is a callable(str).
+
+    When ``bed_path`` is given and specificity testing is on, the predicted
+    amplicon locations (intended + off-target) are also written there as BED for
+    inspection in a genome browser.
+    """
     genome = pd.load_genome(genome_path)
     log("Genome loaded")
 
@@ -38,6 +44,8 @@ def _run_genome_gff(params, output_csv, genome_path, gff_path, target_names,
     # Pre-clean the genome once for specificity testing (big speed win).
     prepared_genome = pd.prepare_genome(genome) if do_specificity else None
 
+    want_bed = bool(bed_path) and do_specificity
+    bed_rows = []
     n_ok = 0
     with open(output_csv, "w", newline="") as fh:
         writer = csv.writer(fh)
@@ -47,6 +55,7 @@ def _run_genome_gff(params, output_csv, genome_path, gff_path, target_names,
         for i, gene in enumerate(gene_list):
             if i % 10 == 0:
                 log(f"Processing gene {i + 1}/{len(gene_list)}...")
+            target = (gene["chrom"], gene["start"], gene["end"])
             for r in pd.design_for_gene(genome, gene, params, flank_size, mode=placement,
                                         num_candidates=params.num_return, rank_by=rank_by):
                 if do_specificity and r["status"] == "OK":
@@ -57,11 +66,20 @@ def _run_genome_gff(params, output_csv, genome_path, gff_path, target_names,
                         min_product=50, max_product=max_prod,
                         seed_len=seed_len, max_mismatches=max_mismatches)
                     r["specificity"] = pd.specificity_label(spec)
+                    if want_bed:
+                        bed_rows.extend(pd.amplicon_bed_rows(
+                            gene["gene_name"] or gene["locus_tag"], spec["amplicons"],
+                            rank=r.get("rank", 0), target=target,
+                            placement=r.get("placement", "")))
                 else:
                     r["specificity"] = "Not tested"
                 if r["status"] == "OK":
                     n_ok += 1
                 writer.writerow(pd.result_to_row(r))
+
+    if want_bed:
+        n_bed = pd.write_bed(bed_path, bed_rows)
+        log(f"Amplicon locations ({n_bed}): {os.path.abspath(bed_path)}")
 
     log(f"Done. {n_ok} primer pair(s) designed across {len(gene_list)} genes")
     log(f"Output: {os.path.abspath(output_csv)}")
@@ -161,6 +179,17 @@ def main():  # pragma: no cover - interactive GUI
             filedialog.asksaveasfilename(defaultextension=".csv"))
     ).grid(row=2, column=2)
 
+    bed_label = tk.Label(file_frame, text="Amplicon BED (optional)")
+    bed_label.grid(row=3, column=0, sticky="w")
+    bed_entry = tk.Entry(file_frame, width=55)
+    bed_entry.grid(row=3, column=1)
+    bed_browse = tk.Button(
+        file_frame, text="Browse",
+        command=lambda: (lambda p: (bed_entry.delete(0, tk.END), bed_entry.insert(0, p)) if p else None)(
+            filedialog.asksaveasfilename(defaultextension=".bed"))
+    )
+    bed_browse.grid(row=3, column=2)
+
     # ----- Gene filter -----
     filter_frame = ttk.LabelFrame(root, text="Gene/CDS Selection (case-insensitive)", padding="10")
     filter_frame.grid(row=2, column=0, columnspan=6, sticky="ew", padx=10, pady=5)
@@ -245,7 +274,8 @@ def main():  # pragma: no cover - interactive GUI
     def toggle_mode():
         genome_gff = mode_var.get() == "genome_gff"
         for w in (genome_label, genome_entry, genome_browse, gff_label, gff_entry,
-                  gff_browse, flank_label, flank_e, placement_label, placement_combo):
+                  gff_browse, flank_label, flank_e, placement_label, placement_combo,
+                  bed_label, bed_entry, bed_browse):
             (w.grid if genome_gff else w.grid_remove)()
         for w in (cds_label, cds_entry, cds_browse):
             (w.grid_remove if genome_gff else w.grid)()
@@ -295,7 +325,8 @@ def main():  # pragma: no cover - interactive GUI
                                 placement=placement_choices[placement_var.get()],
                                 seed_len=int(seed_len_e.get() or 0),
                                 max_mismatches=int(max_mm_e.get() or 0),
-                                rank_by=rank_by)
+                                rank_by=rank_by,
+                                bed_path=bed_entry.get().strip() or None)
             else:
                 if not cds_entry.get():
                     messagebox.showerror("Error", "Select a CDS FASTA file.")

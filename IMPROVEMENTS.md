@@ -7,6 +7,35 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 
 ## ✅ Done in this iteration (latest)
 
+### Accuracy + ease of use — amplicon location BED export (NEW)
+- **You could see *that* a pair was non-specific, but not *where*.** The
+  specificity search already computes every predicted amplicon's genome
+  coordinates, but they were collapsed into a one-line label (`Non-specific
+  (3 amplicons)`) and then discarded — so a user had no way to inspect the
+  off-targets, judge whether they matter, or design around them.
+- **Fix / feature:** a new `amplicon_bed_rows()` turns the amplicon tuples into
+  BED6 rows and `write_bed()` writes a browser-ready, coordinate-sorted BED with
+  a UCSC track header. Each feature is named
+  `{gene}_rank{N}_{placement}_{ontarget|offtarget}_mm{k}` and shaded by mismatch
+  count (score `1000 − 250·mm`), so a genome browser (IGV/JBrowse/UCSC) shows the
+  intended product **and** every off-target at a glance, darker = more likely to
+  prime. On/off-target is decided by overlap with the gene's own locus, so the
+  intended amplicon is labelled automatically. Exposed as `--bed FILE` (CLI,
+  guarded to require `--specificity` and failing fast before the genome loads)
+  and an *Amplicon BED (optional)* field in the GUI.
+- **Regression-guarded** (7 new tests: on/off-target classification incl.
+  wrong-contig, no-target → all off-target, 1-based rank + placement in the
+  feature name, empty-amplicon → no rows, `write_bed` sorts + writes the header
+  and BED6 layout, empty export still writes a valid header-only file, plus a
+  `specificity_label` singular-amplicon guard). **Benchmarked** (new "Amplicon
+  BED export" section: ~1.9 µs/amplicon — a pure in-memory transform of tuples
+  the specificity search already produced, so `--bed` adds no meaningful cost).
+  Verified end-to-end on a synthetic genome carrying a duplicated gene: the
+  duplicate is correctly emitted as an `offtarget` feature at its coordinates
+  while the real locus is `ontarget`.
+- **Also fixed** a dead computed variable (`note`) in `specificity_label()` that
+  was assigned but never used.
+
 ### Bug fix (ease of use + accuracy) — tolerant FASTA loading (NEW)
 - **Real genome / CDS FASTAs crashed the loader on current Biopython.**
   Biopython **>= 1.85** made the default `"fasta"` parser *strict*: it now
@@ -218,7 +247,9 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 - Save/load parameter presets (JSON) from the GUI.
 - Allow primers to be placed in flanking regions (knockout-verification
   primers), not just inside the gene; the flank size is already extracted.
-- Export GenBank/BED of amplicon locations.
+- Export GenBank/BED of amplicon locations. ✅ *BED done* (`--bed` / GUI
+  *Amplicon BED*; on/off-target-classified, mismatch-shaded, browser-ready).
+  Follow-ups: GenBank export, and BED for CDS mode (needs a coordinate frame).
 - Amplicon Tm / size-distribution plots.
 - Package as `pip install`-able with a console entry point.
 

@@ -625,8 +625,6 @@ def specificity_label(result: dict) -> str:
         return result.get("error", "Invalid")
     if count == 0:
         return "No amplicons found"
-    mm = result.get("max_mismatches_observed", 0)
-    note = f", up to {mm} mismatch{'es' if mm != 1 else ''}" if mm else ""
     if count == 1:
         return "Specific (1 amplicon)"
     offtarget_mm = [a[4] for a in result.get("amplicons", []) if len(a) > 4 and a[4] > 0]
@@ -635,6 +633,83 @@ def specificity_label(result: dict) -> str:
         return (f"Non-specific ({count} amplicons; nearest off-target "
                 f"{m} mismatch{'es' if m != 1 else ''})")
     return f"Non-specific ({count} amplicons)"
+
+
+# --------------------------------------------------------------------------- #
+# Amplicon location export (BED)
+# --------------------------------------------------------------------------- #
+# A predicted amplicon that overlaps the intended target locus is the product
+# the user *wants*; everything else the in-silico PCR predicts is an off-target
+# they need to see the coordinates of. Emitting both to BED lets the locations be
+# loaded straight into a genome browser (IGV, JBrowse, UCSC) to verify a design
+# by eye instead of trusting a bare "Non-specific (3 amplicons)" count.
+
+
+def _amplicon_is_on_target(amp: tuple, target: Optional[tuple]) -> bool:
+    """True when amplicon ``(chrom, start, end, ...)`` overlaps ``target``.
+
+    ``target`` is ``(chrom, start, end)`` of the intended locus (e.g. a gene
+    body); a half-open-interval overlap on the same contig counts as on-target.
+    With no target every amplicon is treated as off-target (unknown intent).
+    """
+    if not target:
+        return False
+    t_chrom, t_start, t_end = target
+    a_chrom, a_start, a_end = amp[0], amp[1], amp[2]
+    return a_chrom == t_chrom and a_start < t_end and t_start < a_end
+
+
+def amplicon_bed_rows(
+    name: str,
+    amplicons: List[tuple],
+    *,
+    rank: int = 0,
+    target: Optional[tuple] = None,
+    placement: str = "",
+) -> List[list]:
+    """Turn predicted amplicons into BED6 rows for one primer pair.
+
+    ``amplicons`` are ``(chrom, start, end, size, mismatches)`` tuples from
+    :func:`in_silico_pcr` (already 0-based, half-open — the BED convention, so
+    coordinates pass straight through). Each becomes
+    ``[chrom, start, end, feature_name, score, strand]`` where:
+
+    * ``feature_name`` encodes the target ``name``, 1-based ``rank``, whether the
+      amplicon is ``ontarget`` (overlaps ``target``) or ``offtarget``, and its
+      mismatch count — so a browser track is self-describing;
+    * ``score`` (0–1000, BED's shading field) starts at 1000 for a perfect match
+      and drops with each mismatch, so darker features = more likely to prime;
+    * ``strand`` is ``+`` (an amplicon spans both strands; the interval is what
+      matters).
+
+    Coordinates are relative to the cleaned (ACGT-only) contig that the
+    specificity search runs over — the same space :func:`in_silico_pcr` reports.
+    """
+    rows: List[list] = []
+    tag = f"{name}_rank{rank + 1}" + (f"_{placement}" if placement else "")
+    for amp in amplicons:
+        chrom, start, end = amp[0], amp[1], amp[2]
+        mm = amp[4] if len(amp) > 4 else 0
+        kind = "ontarget" if _amplicon_is_on_target(amp, target) else "offtarget"
+        score = max(0, min(1000, 1000 - mm * 250))
+        rows.append([chrom, int(start), int(end), f"{tag}_{kind}_mm{mm}", score, "+"])
+    return rows
+
+
+def write_bed(path: str, rows: List[list], track_name: str = "predicted_amplicons") -> int:
+    """Write BED6 ``rows`` to ``path`` with a UCSC track header. Returns row count.
+
+    Rows are sorted by (chrom, start, end) so the file is browser-ready. An empty
+    ``rows`` still writes a valid (header-only) BED so downstream tooling doesn't
+    choke on a missing file.
+    """
+    ordered = sorted(rows, key=lambda r: (r[0], r[1], r[2]))
+    with open(path, "w") as fh:
+        fh.write(f'track name="{track_name}" description="in-silico PCR predicted '
+                 f'amplicons (score=1000-250*mismatches)" useScore=1\n')
+        for r in ordered:
+            fh.write("\t".join(str(v) for v in r) + "\n")
+    return len(ordered)
 
 
 # --------------------------------------------------------------------------- #

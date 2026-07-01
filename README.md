@@ -43,6 +43,12 @@ GUI** or a **headless CLI**, with all logic in an importable, tested core module
   mismatches each predicted off-target carries (e.g. *"Non-specific (3
   amplicons, up to 2 mismatches)"*), so a perfect on-target is distinguishable
   from a weak, mismatched off-target.
+- **Amplicon location BED export** (`--bed` / GUI *Amplicon BED* field) — write
+  every predicted amplicon (the intended product **and** every off-target) to a
+  BED file you can drop into IGV/JBrowse/UCSC. Each feature is named with the
+  gene, rank, `ontarget`/`offtarget` classification and mismatch count, and
+  shaded by mismatch, so you can *see where* a "non-specific" pair mis-primes
+  instead of trusting a bare count.
 - **Ranked alternate candidates** — ask for the *N* best primer pairs per
   template (`--num-return`/GUI *Candidates* field) and get one row each, ordered
   by Primer3 rank (`Rank` column). Lets you pick a cleaner alternate when the top
@@ -110,6 +116,10 @@ python primer_cli.py genome ... --placement custom --fwd-region upstream --rev-r
 # Mismatch-tolerant specificity: 12 nt exact 3' seed, up to 2 mismatches in the 5' tail
 python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \
     --specificity --seed-len 12 --max-mismatches 2 -o primers.csv
+
+# Also export predicted amplicon locations (on- and off-target) as BED for a genome browser
+python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \
+    --genes sulA,opgH,galU --specificity --bed amplicons.bed -o primers.csv
 
 # Report the top 3 ranked primer pairs per gene (bench-ready fallbacks)
 python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \

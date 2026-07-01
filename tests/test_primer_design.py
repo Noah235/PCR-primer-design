@@ -271,6 +271,79 @@ def test_specificity_label_reports_offtarget_mismatches():
     assert "1 mismatch)" in pd.specificity_label(res)
 
 
+def test_specificity_label_singular_amplicon_when_on_target_only():
+    """One perfect amplicon is 'Specific', not a mismatch-annotated non-specific."""
+    res = {"count": 1, "amplicons": [("chr1", 0, 120, 120, 0)]}
+    assert pd.specificity_label(res) == "Specific (1 amplicon)"
+
+
+# --------------------------------------------------------------------------- #
+# BED export of predicted amplicon locations
+# --------------------------------------------------------------------------- #
+def test_amplicon_bed_rows_classifies_on_and_off_target():
+    """The intended locus is labelled ontarget; a distal amplicon offtarget."""
+    amplicons = [
+        ("chr1", 100, 220, 120, 0),   # overlaps the target -> ontarget
+        ("chr1", 5000, 5120, 120, 2),  # elsewhere -> offtarget, 2 mismatches
+        ("chr2", 100, 220, 120, 0),   # other contig -> offtarget
+    ]
+    rows = pd.amplicon_bed_rows("geneA", amplicons, rank=0,
+                                target=("chr1", 150, 180))
+    assert len(rows) == 3
+    # BED coordinates pass straight through (already 0-based, half-open).
+    assert rows[0][:3] == ["chr1", 100, 220]
+    names = [r[3] for r in rows]
+    assert names[0] == "geneA_rank1_ontarget_mm0"
+    assert names[1] == "geneA_rank1_offtarget_mm2"
+    assert names[2] == "geneA_rank1_offtarget_mm0"  # right contig required
+    # Score shades by mismatch: perfect = 1000, each mismatch -250.
+    assert rows[0][4] == 1000
+    assert rows[1][4] == 500
+    assert all(r[5] == "+" for r in rows)
+
+
+def test_amplicon_bed_rows_no_target_is_all_offtarget():
+    rows = pd.amplicon_bed_rows("g", [("c", 0, 100, 100, 0)], rank=2)
+    assert rows[0][3] == "g_rank3_offtarget_mm0"   # rank is 1-based in the name
+
+
+def test_amplicon_bed_rows_includes_placement_tag():
+    rows = pd.amplicon_bed_rows("g", [("c", 0, 100, 100, 0)], rank=0,
+                                placement="upstream->internal")
+    assert "upstream->internal" in rows[0][3]
+
+
+def test_amplicon_bed_rows_empty_amplicons():
+    assert pd.amplicon_bed_rows("g", []) == []
+
+
+def test_write_bed_sorts_and_writes_header(tmp_path):
+    rows = [
+        ["chr2", 10, 50, "a_offtarget_mm0", 1000, "+"],
+        ["chr1", 300, 400, "b_offtarget_mm1", 750, "+"],
+        ["chr1", 10, 50, "c_ontarget_mm0", 1000, "+"],
+    ]
+    path = str(tmp_path / "amplicons.bed")
+    n = pd.write_bed(path, rows)
+    assert n == 3
+    with open(path) as fh:
+        lines = fh.read().splitlines()
+    assert lines[0].startswith("track name=")
+    data = lines[1:]
+    # Sorted by (chrom, start, end): chr1/10, chr1/300, chr2/10.
+    assert [ln.split("\t")[0:2] for ln in data] == [
+        ["chr1", "10"], ["chr1", "300"], ["chr2", "10"]]
+    # Tab-separated BED6.
+    assert data[0].split("\t") == ["chr1", "10", "50", "c_ontarget_mm0", "1000", "+"]
+
+
+def test_write_bed_empty_still_writes_header(tmp_path):
+    path = str(tmp_path / "empty.bed")
+    assert pd.write_bed(path, []) == 0
+    with open(path) as fh:
+        assert fh.read().startswith("track name=")
+
+
 def test_in_silico_pcr_amplicon_carries_mismatch_count():
     fwd = "AAAGGGCTACGTTGCAATCG"
     rev = "CCCTTTGCAGTACTTAGGAC"

@@ -218,6 +218,36 @@ def bench_placement(genome_seq, genome, n_genes, gene_len=1000, flank=200):
     return t["elapsed"], pairs, n_genes
 
 
+def bench_bed_export(n_pairs=200, amps_per_pair=5, reps=20):
+    """Time amplicon -> BED row conversion + sorted write.
+
+    BED export is a pure in-memory transform of the amplicon tuples the
+    specificity search already produced (no extra Primer3 or genome work), so
+    this confirms it adds negligible cost even for a whole-panel run with many
+    predicted amplicons.
+    """
+    rng = random.Random(11)
+    pairs = []
+    for _ in range(n_pairs):
+        amps = []
+        for _ in range(amps_per_pair):
+            start = rng.randint(0, 5_000_000)
+            amps.append(("chr1", start, start + 200, 200, rng.randint(0, 3)))
+        pairs.append(amps)
+    target = ("chr1", 1000, 2000)
+    out_path = "_bench_amplicons.bed"
+    with timer() as t:
+        for _ in range(reps):
+            rows = []
+            for i, amps in enumerate(pairs):
+                rows.extend(pd.amplicon_bed_rows("gene", amps, rank=i % 3, target=target))
+            pd.write_bed(out_path, rows)
+    import os
+    os.remove(out_path)
+    total_amps = n_pairs * amps_per_pair
+    return t["elapsed"] / reps, total_amps
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -255,6 +285,9 @@ def main():
 
     print(f"Placement benchmark: all permutations over {args.genes} genes ...")
     place_t, place_pairs, place_genes = bench_placement(genome_seq, genome, args.genes)
+
+    print("BED-export benchmark: amplicon locations -> sorted BED ...")
+    bed_t, bed_amps = bench_bed_export()
 
     speedup = legacy_t / fixed_t if fixed_t else float("inf")
 
@@ -329,6 +362,18 @@ def main():
         "| ---: | ---: | ---: | ---: |",
         f"| {place_genes} | {place_pairs} | {place_t:.3f} s | "
         f"{place_t / place_genes * 1000:.1f} ms |",
+        "",
+        "## Amplicon BED export",
+        "",
+        "| Amplicons | Total time | Per amplicon |",
+        "| ---: | ---: | ---: |",
+        f"| {bed_amps} | {bed_t * 1000:.2f} ms | {bed_t / bed_amps * 1e6:.2f} µs |",
+        "",
+        "Exporting predicted amplicon locations to BED is a pure in-memory "
+        "transform of the tuples the specificity search already produced (classify "
+        "on/off-target, shade by mismatch, sort by coordinate) plus one file "
+        "write — microseconds per amplicon, so `--bed` adds no meaningful cost to "
+        "a run that already computed specificity.",
         "",
     ]
     report = "\n".join(lines)
