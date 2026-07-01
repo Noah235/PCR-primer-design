@@ -72,6 +72,55 @@ def test_filter_genes_by_names():
 
 
 # --------------------------------------------------------------------------- #
+# Tolerant FASTA loading (Biopython >= 1.85 strict-parser regression)
+# --------------------------------------------------------------------------- #
+def test_load_genome_tolerates_leading_comments(tmp_path):
+    """A FASTA with blank/';' comment lines before the first record must load.
+
+    Biopython >= 1.85 made the default 'fasta' parser reject such files; the
+    loader falls back to a lenient parse so real-world genomes still work.
+    """
+    fa = tmp_path / "g.fasta"
+    fa.write_text("; a comment line\n\n>chr1 desc\nACGTACGTACGTACGT\n")
+    genome = pd.load_genome(str(fa))
+    assert list(genome) == ["chr1"]
+    assert str(genome["chr1"].seq) == "ACGTACGTACGTACGT"
+
+
+def test_load_genome_plain_fasta_still_works(tmp_path):
+    """The strict fast path is still used for clean files (no regression)."""
+    fa = tmp_path / "g.fasta"
+    fa.write_text(">c1\nACGTACGTACGT\n>c2\nTTTTGGGG\n")
+    genome = pd.load_genome(str(fa))
+    assert set(genome) == {"c1", "c2"}
+
+
+def test_load_genome_empty_file_clear_error(tmp_path):
+    """An empty/headerless FASTA raises the clear 'No sequences' message, not an
+    opaque Biopython traceback."""
+    fa = tmp_path / "empty.fasta"
+    fa.write_text("\r\n")
+    with pytest.raises(ValueError, match="No sequences found"):
+        pd.load_genome(str(fa))
+
+
+def test_load_cds_tolerates_leading_and_inline_comments(tmp_path):
+    """CDS loading shares the tolerant reader: leading blanks + ';' comments OK."""
+    fa = tmp_path / "cds.fasta"
+    fa.write_text("\n\n>g1 [gene=abc]\nATGAAACGT\n; mid comment\n"
+                  ">g2 [locus_tag=L2]\nATGCCCGGG\n")
+    cds = pd.load_cds_sequences(str(fa))
+    assert set(cds) == {"abc", "l2"}
+    assert cds["abc"]["sequence"] == "ATGAAACGT"
+
+
+def test_strip_leading_fasta_comments():
+    text = "; hdr comment\n\n>a\nACGT\n; inline\n>b\nTTTT\n"
+    cleaned = pd._strip_leading_fasta_comments(text)
+    assert cleaned == ">a\nACGT\n>b\nTTTT\n"
+
+
+# --------------------------------------------------------------------------- #
 # GFF3 parsing
 # --------------------------------------------------------------------------- #
 def test_parse_gff3(tmp_path):

@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field, asdict
+from io import StringIO
 from typing import Dict, List, Optional, Tuple
 
 from Bio import SeqIO
@@ -208,9 +209,51 @@ def heterodimer_tm(
 # --------------------------------------------------------------------------- #
 # I/O: genome, CDS, GFF3
 # --------------------------------------------------------------------------- #
+def _strip_leading_fasta_comments(text: str) -> str:
+    """Drop blank/comment lines before the first record and ``;`` comment lines.
+
+    This reproduces the lenient (Pearson/BLAST-style) FASTA behaviour: any
+    content before the first ``>`` header is discarded, and ``;``-prefixed
+    comment lines anywhere are ignored.
+    """
+    out: List[str] = []
+    started = False
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if not started:
+            if stripped.startswith(">"):
+                started = True
+            else:
+                continue  # blank line or comment before the first record
+        elif stripped.startswith(";"):
+            continue       # Pearson-style inline comment line
+        out.append(line)
+    return "".join(out)
+
+
+def read_fasta_records(fasta_file: str) -> List["SeqIO.SeqRecord"]:
+    """Parse a FASTA file tolerantly across Biopython versions.
+
+    Biopython >= 1.85 made the default ``"fasta"`` parser *strict*: it raises on
+    files that have blank or comment lines before the first record (and on
+    ``;`` comment lines anywhere). Real-world genome / CDS FASTAs routinely
+    carry such lines, so a file that loaded fine on older Biopython now crashes
+    with an opaque traceback. We try the fast strict parser first and, only on
+    failure, fall back to stripping the offending leading/comment lines and
+    re-parsing the cleaned text — so the loader works on every supported
+    Biopython without depending on version-specific format names.
+    """
+    try:
+        return list(SeqIO.parse(fasta_file, "fasta"))
+    except ValueError:
+        with open(fasta_file) as handle:
+            cleaned = _strip_leading_fasta_comments(handle.read())
+        return list(SeqIO.parse(StringIO(cleaned), "fasta"))
+
+
 def load_genome(fasta_file: str) -> Dict[str, "SeqIO.SeqRecord"]:
     """Load a (multi-)FASTA genome into a ``{id: SeqRecord}`` dict."""
-    genome = SeqIO.to_dict(SeqIO.parse(fasta_file, "fasta"))
+    genome = SeqIO.to_dict(read_fasta_records(fasta_file))
     if not genome:
         raise ValueError(f"No sequences found in FASTA file: {fasta_file}")
     return genome
@@ -219,7 +262,7 @@ def load_genome(fasta_file: str) -> Dict[str, "SeqIO.SeqRecord"]:
 def load_cds_sequences(cds_file: str) -> Dict[str, dict]:
     """Load CDS records keyed by lower-cased gene name / locus tag / id."""
     cds_dict: Dict[str, dict] = {}
-    for record in SeqIO.parse(cds_file, "fasta"):
+    for record in read_fasta_records(cds_file):
         header = record.description
         gene_name = None
         if "gene=" in header:
