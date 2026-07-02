@@ -168,6 +168,75 @@ def run_cds(a):
                  n_ok, len(cds), a.output)
 
 
+def run_check(a):
+    """In-silico QC of user-supplied primers (no template design).
+
+    Reports each pair's Tm, GC%, secondary-structure Tm, composite quality score
+    and warnings, and — when a genome is given — runs the accurate
+    two-orientation (optionally mismatch-tolerant) in-silico PCR specificity
+    check and reports the predicted product size and off-target count.
+    """
+    params = _params_from_args(a)
+    pairs = []
+    if a.primers:
+        pairs.extend(pd.read_primer_pairs(a.primers))
+    if a.forward and a.reverse:
+        pairs.append((a.name or f"pair{len(pairs) + 1}", a.forward, a.reverse))
+    if not pairs:
+        sys.exit("Provide primers via --forward/--reverse or --primers FILE.")
+    if a.bed and not a.genome:
+        sys.exit("--bed requires --genome (amplicon locations come from the "
+                 "in-silico PCR search against a genome).")
+
+    prepared = None
+    if a.genome:
+        prepared = pd.prepare_genome(pd.load_genome(a.genome))
+        logging.info("Genome loaded; checking %d primer pair(s)...", len(pairs))
+    else:
+        logging.info("No genome given: reporting primer QC only for %d pair(s).",
+                     len(pairs))
+
+    # Generous search window so a pair's own (possibly large) product is found
+    # while still catching genuine off-target products a few kb apart.
+    min_prod, max_prod = 50, max(params.product_max, 5000)
+    rows, bed_rows, n_specific = [], [], 0
+    for name, fwd, rev in pairs:
+        r = pd.analyze_primer_pair(name, fwd, rev, params)
+        if prepared is not None and r["status"] == "OK":
+            spec = pd.in_silico_pcr(r["forward"], r["reverse"], prepared,
+                                    min_prod, max_prod,
+                                    seed_len=a.seed_len,
+                                    max_mismatches=a.max_mismatches)
+            r["specificity"] = pd.specificity_label(spec)
+            # A single predicted amplicon is unambiguously the product size.
+            if spec.get("count") == 1:
+                r["product_size"] = spec["amplicons"][0][3]
+            n_specific += spec.get("count") == 1
+            if a.bed:
+                bed_rows.extend(pd.amplicon_bed_rows(
+                    name, spec["amplicons"], rank=0, target=None,
+                    placement="user"))
+        elif prepared is None:
+            r["specificity"] = "Not tested (no genome)"
+        rows.append(pd.result_to_row(r))
+
+    if a.bed:
+        n_bed = pd.write_bed(a.bed, bed_rows)
+        logging.info("%d predicted amplicon location(s) -> %s", n_bed, a.bed)
+
+    spec_desc = "no genome"
+    if prepared is not None:
+        spec_desc = (f"specificity=seed{a.seed_len}/mm{a.max_mismatches}"
+                     if a.seed_len else "specificity=exact")
+    _write(a.output, pd.params_summary(
+        params, f"mode=check, pairs={len(pairs)}, {spec_desc}"), rows)
+    if prepared is not None:
+        logging.info("%d/%d pair(s) specific (single predicted amplicon) -> %s",
+                     n_specific, len(pairs), a.output)
+    else:
+        logging.info("%d primer pair(s) QC'd -> %s", len(pairs), a.output)
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="Batch PCR primer design (headless).")
     p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
@@ -208,6 +277,30 @@ def build_parser():
     c.add_argument("-o", "--output", default="primers.csv")
     _add_param_args(c)
     c.set_defaults(func=run_cds)
+
+    ch = sub.add_parser(
+        "check",
+        help="QC / in-silico-PCR check of primers you already have")
+    ch.add_argument("--forward", help="forward primer sequence (5'->3')")
+    ch.add_argument("--reverse", help="reverse primer sequence (5'->3')")
+    ch.add_argument("--name", default=None, help="label for a single pair")
+    ch.add_argument("--primers", default=None,
+                    help="batch file of 'name forward reverse' lines "
+                         "(comma/tab/space separated; '#' comments ignored)")
+    ch.add_argument("--genome", default=None,
+                    help="optional genome FASTA to run the specificity check "
+                         "against (omit for primer QC only)")
+    ch.add_argument("--seed-len", type=int, default=0,
+                    help="3'-anchor seed length for mismatch-tolerant "
+                         "specificity (0 = exact; ~12 is sensible)")
+    ch.add_argument("--max-mismatches", type=int, default=0,
+                    help="max 5' mismatches (only used when --seed-len > 0)")
+    ch.add_argument("--bed", default=None,
+                    help="write predicted amplicon locations to BED "
+                         "(requires --genome)")
+    ch.add_argument("-o", "--output", default="primer_check.csv")
+    _add_param_args(ch)
+    ch.set_defaults(func=run_check)
     return p
 
 

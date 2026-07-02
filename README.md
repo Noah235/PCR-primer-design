@@ -8,9 +8,14 @@ GUI** or a **headless CLI**, with all logic in an importable, tested core module
 
 ## Features
 
-- Two input modes:
+- Three input modes:
   - **Genome FASTA + GFF3** — extract each gene (with optional flanks) and design primers.
   - **CDS FASTA only** — design directly from coding sequences.
+  - **Check existing primers** — QC and in-silico-PCR a primer pair (or a batch
+    file of pairs) you *already have*, without designing anything (`check`
+    subcommand / see below). Reports the same Tm/GC/secondary-structure/quality
+    metrics as the design pipeline and, against a genome, the predicted product
+    size and off-target count.
 - Primer design via Primer3 with tunable size, Tm, GC%, product size and GC-clamp.
 - **Ranked alternate primer pairs** — ask for the top *N* pairs per target
   (`--num-return N` / GUI *Primers/target*) so you have bench-ready fallbacks if
@@ -104,6 +109,17 @@ python primer_cli.py genome \
 
 # CDS FASTA, all records
 python primer_cli.py cds --cds cds.fasta -o primers.csv
+
+# Check primers you ALREADY have: QC + in-silico PCR against a genome
+python primer_cli.py check --genome genome.fasta \
+    --forward ACGTGCATGCATGCTAGCAT --reverse TGCATGCATCGATCGATGCA -o check.csv
+
+# QC only (no genome): Tm / GC / hairpin-dimer / quality score for a pair
+python primer_cli.py check --forward ACGT... --reverse TGCA... -o qc.csv
+
+# Batch: a file of 'name forward reverse' lines (comma/tab/space separated)
+python primer_cli.py check --genome genome.fasta --primers my_primers.txt \
+    --seed-len 12 --max-mismatches 2 --bed check_amplicons.bed -o check.csv
 
 # Primer placement: amplify each gene from upstream flank to downstream flank
 python primer_cli.py genome --genome genome.fasta --gff annotation.gff3 \

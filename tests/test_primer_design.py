@@ -732,5 +732,112 @@ def test_rank_by_invalid_raises():
                                     rank_by="bogus")
 
 
+# --------------------------------------------------------------------------- #
+# User-supplied primer QC / check mode
+# --------------------------------------------------------------------------- #
+def test_analyze_primer_pair_reports_metrics():
+    """A real pair gets the same Tm/GC/structure/quality metrics as a design."""
+    fwd = "ACGTGCATGCATGCTAGCAT"
+    rev = "TGCATGCATCGATCGATGCA"
+    r = pd.analyze_primer_pair("mypair", fwd, rev)
+    assert r["status"] == "OK"
+    assert r["gene"] == "mypair"
+    assert r["forward"] == fwd and r["reverse"] == rev
+    assert r["fwd_tm"] is not None and r["rev_tm"] is not None
+    assert r["fwd_gc"] == pd.calc_gc(fwd)
+    assert r["tm_diff"] == round(abs(r["fwd_tm"] - r["rev_tm"]), 2)
+    assert r["heterodimer_tm"] is not None
+    # Quality score is populated and in range; product size unknown without genome.
+    assert r["quality_score"] is not None and 0 <= r["quality_score"] <= 100
+    assert r["product_size"] is None
+    # Row is emittable with the shared column layout.
+    assert len(pd.result_to_row(r)) == len(pd.RESULT_COLUMNS)
+
+
+def test_analyze_primer_pair_metrics_match_designed_primer():
+    """Tm/GC of a primer are identical whether it was designed or supplied."""
+    template = _random_seq(800, seed=42)
+    designed = pd.design_primers_for_sequence("g", template,
+                                              pd.PrimerParams(product_min=100,
+                                                              product_max=400))
+    assert designed["status"] == "OK"
+    checked = pd.analyze_primer_pair("g", designed["forward"], designed["reverse"])
+    assert checked["fwd_tm"] == designed["fwd_tm"]
+    assert checked["rev_gc"] == designed["rev_gc"]
+    assert checked["heterodimer_tm"] == designed["heterodimer_tm"]
+
+
+def test_analyze_primer_pair_flags_bad_input():
+    empty = pd.analyze_primer_pair("x", "", "ACGTACGTACGT")
+    assert empty["status"] == "Empty/invalid primer sequence"
+    assert empty["forward"] is None
+    short = pd.analyze_primer_pair("x", "ACGT", "ACGTACGTACGT")
+    assert "too short" in short["status"].lower()
+    assert short["quality_score"] is None
+
+
+def test_read_primer_pairs_parses_all_formats(tmp_path):
+    f = tmp_path / "primers.txt"
+    f.write_text(
+        "# a comment line\n"
+        "geneA, ACGTACGTAC, TGCATGCATG\n"        # comma
+        "geneB\tACGTACGTAA\tTGCATGCATT\n"        # tab
+        "geneC ACGTACGTAG TGCATGCATC\n"          # whitespace
+        "ACGTACGTAT TGCATGCATA\n"                # 2-field -> auto-named
+        "\n"                                      # blank ignored
+        "malformed_single_field\n"
+    )
+    pairs = pd.read_primer_pairs(str(f))
+    assert pairs[0] == ("geneA", "ACGTACGTAC", "TGCATGCATG")
+    assert pairs[1] == ("geneB", "ACGTACGTAA", "TGCATGCATT")
+    assert pairs[2] == ("geneC", "ACGTACGTAG", "TGCATGCATC")
+    assert pairs[3][0].startswith("pair") and pairs[3][1] == "ACGTACGTAT"
+    # The lone-field line is skipped, not crashed on.
+    assert len(pairs) == 4
+
+
+def test_check_cli_end_to_end_specificity(tmp_path):
+    """The `check` CLI reports a specific pair as a single predicted amplicon."""
+    import primer_cli
+
+    # Build a genome where exactly one product forms for the pair.
+    core = _random_seq(300, seed=7)
+    fwd = core[:20]
+    rev = str(Seq(core[-20:]).reverse_complement())
+    flankL = _random_seq(200, seed=8)
+    flankR = _random_seq(200, seed=9)
+    genome_seq = flankL + core + flankR
+    genome_path = tmp_path / "genome.fasta"
+    genome_path.write_text(f">chr1\n{genome_seq}\n")
+    out = tmp_path / "check.csv"
+
+    primer_cli.main([
+        "check", "--genome", str(genome_path),
+        "--forward", fwd, "--reverse", rev,
+        "--name", "target", "-o", str(out),
+    ])
+    text = out.read_text()
+    assert "target" in text
+    # Exactly one predicted amplicon -> product size 300 reported, "Specific".
+    assert "Specific (1 amplicon)" in text
+    assert ",300," in text or "\t300\t" in text or "300" in text
+
+
+def test_check_cli_qc_only_without_genome(tmp_path):
+    """`check` with no genome still writes QC rows (Tm/GC/quality)."""
+    import primer_cli
+
+    out = tmp_path / "qc.csv"
+    primer_cli.main([
+        "check",
+        "--forward", "ACGTGCATGCATGCTAGCAT",
+        "--reverse", "TGCATGCATCGATCGATGCA",
+        "-o", str(out),
+    ])
+    text = out.read_text()
+    assert "Not tested (no genome)" in text
+    assert "mode=check" in text
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
