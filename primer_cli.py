@@ -85,6 +85,9 @@ def _resolve_placement(a):
 def run_genome(a):
     params = _params_from_args(a)
     placement = _resolve_placement(a)
+    if a.bed and not a.specificity:
+        sys.exit("--bed requires --specificity (amplicon locations come from the "
+                 "in-silico PCR specificity search).")
     genome = pd.load_genome(a.genome)
     all_genes = pd.parse_gff3_full(a.gff)
     gene_list, _found, not_found = pd.filter_genes_by_names(all_genes, a.genes or "")
@@ -97,8 +100,9 @@ def run_genome(a):
 
     prepared_genome = pd.prepare_genome(genome) if a.specificity else None
     rank_by = "quality" if a.rank_by_quality else "primer3"
-    rows, n_ok = [], 0
+    rows, n_ok, bed_rows = [], 0, []
     for gene in gene_list:
+        target = (gene["chrom"], gene["start"], gene["end"])
         for r in pd.design_for_gene(genome, gene, params, a.flank, mode=placement,
                                     num_candidates=params.num_return, rank_by=rank_by):
             if a.specificity and r["status"] == "OK":
@@ -108,10 +112,19 @@ def run_genome(a):
                                         seed_len=a.seed_len,
                                         max_mismatches=a.max_mismatches)
                 r["specificity"] = pd.specificity_label(spec)
+                if a.bed:
+                    bed_rows.extend(pd.amplicon_bed_rows(
+                        gene["gene_name"] or gene["locus_tag"], spec["amplicons"],
+                        rank=r.get("rank", 0), target=target,
+                        placement=r.get("placement", "")))
             else:
                 r["specificity"] = "Not tested"
             n_ok += r["status"] == "OK"
             rows.append(pd.result_to_row(r))
+
+    if a.bed:
+        n_bed = pd.write_bed(a.bed, bed_rows)
+        logging.info("%d predicted amplicon location(s) -> %s", n_bed, a.bed)
 
     if a.specificity:
         spec_desc = (f"specificity=seed{a.seed_len}/mm{a.max_mismatches}"
@@ -182,6 +195,10 @@ def build_parser():
     g.add_argument("--rev-region", choices=list(pd.PLACEMENT_REGIONS),
                    help="reverse-primer region for --placement custom")
     g.add_argument("-o", "--output", default="primers.csv")
+    g.add_argument("--bed", default=None,
+                   help="also write predicted amplicon locations (intended + "
+                        "off-target) to this BED file for a genome browser "
+                        "(requires --specificity)")
     _add_param_args(g)
     g.set_defaults(func=run_genome)
 
