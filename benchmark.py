@@ -201,6 +201,36 @@ def bench_fasta_loading(genome_seq, n_records=200, reps=5):
     return fast["elapsed"] / reps, fallback["elapsed"] / reps, n_records
 
 
+def bench_check(genome_seq, genome, n_pairs):
+    """Time the `check` path: QC-only vs QC + in-silico-PCR specificity.
+
+    ``analyze_primer_pair`` computes the Tm / GC / secondary-structure / quality
+    metrics for a user-supplied pair (no Primer3 design call); adding the genome
+    specificity check is the same two-orientation search the design pipeline
+    uses. This separates the (cheap) QC cost from the specificity cost so the new
+    front-end's overhead is visible.
+    """
+    rng = random.Random(321)
+    pairs = []
+    for _ in range(n_pairs):
+        start = rng.randint(0, len(genome_seq) - 500)
+        fwd = genome_seq[start:start + 20]
+        rev = str(Seq(genome_seq[start + 200:start + 220]).reverse_complement())
+        pairs.append((fwd, rev))
+
+    params = pd.PrimerParams()
+    with timer() as qc:
+        for fwd, rev in pairs:
+            pd.analyze_primer_pair("p", fwd, rev, params)
+
+    prepared = pd.prepare_genome(genome)
+    with timer() as full:
+        for fwd, rev in pairs:
+            r = pd.analyze_primer_pair("p", fwd, rev, params)
+            pd.in_silico_pcr(r["forward"], r["reverse"], prepared, 50, 5000)
+    return qc["elapsed"], full["elapsed"], len(pairs)
+
+
 def bench_placement(genome_seq, genome, n_genes, gene_len=1000, flank=200):
     """Design every placement permutation (6 per gene) over n_genes."""
     rng = random.Random(7)
@@ -286,6 +316,9 @@ def main():
     print(f"Placement benchmark: all permutations over {args.genes} genes ...")
     place_t, place_pairs, place_genes = bench_placement(genome_seq, genome, args.genes)
 
+    print(f"Check benchmark: QC vs QC+specificity over {args.pairs} pairs ...")
+    check_qc_t, check_full_t, check_n = bench_check(genome_seq, genome, args.pairs)
+
     print("BED-export benchmark: amplicon locations -> sorted BED ...")
     bed_t, bed_amps = bench_bed_export()
 
@@ -362,6 +395,21 @@ def main():
         "| ---: | ---: | ---: | ---: |",
         f"| {place_genes} | {place_pairs} | {place_t:.3f} s | "
         f"{place_t / place_genes * 1000:.1f} ms |",
+        "",
+        "## Primer check (QC of user-supplied primers)",
+        "",
+        "| Path | Pairs | Total time | Per pair |",
+        "| --- | ---: | ---: | ---: |",
+        f"| QC only (Tm/GC/structure/quality) | {check_n} | {check_qc_t:.3f} s | "
+        f"{check_qc_t / check_n * 1000:.2f} ms |",
+        f"| QC + in-silico-PCR specificity | {check_n} | {check_full_t:.3f} s | "
+        f"{check_full_t / check_n * 1000:.1f} ms |",
+        "",
+        "The `check` front-end validates primers a user already has. QC alone is "
+        "a few secondary-structure calls per pair (no Primer3 design); adding the "
+        "genome specificity check costs the same two-orientation search the design "
+        "pipeline already uses, so `check` reuses the accurate engine at no extra "
+        "algorithmic cost.",
         "",
         "## Amplicon BED export",
         "",

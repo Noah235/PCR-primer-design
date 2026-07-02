@@ -319,6 +319,31 @@ def parse_gff3_full(gff_file: str) -> List[dict]:
     return genes
 
 
+def read_primer_pairs(path: str) -> List[Tuple[str, str, str]]:
+    """Read a batch primer file into ``[(name, forward, reverse), ...]``.
+
+    Each non-blank, non-``#`` line holds ``name forward reverse`` with fields
+    separated by comma, tab or whitespace (so a CSV, TSV or space-delimited list
+    all work). A two-field line is read as ``forward reverse`` and auto-named
+    ``pair{N}``. Malformed lines are skipped with a warning rather than aborting
+    the whole batch.
+    """
+    pairs: List[Tuple[str, str, str]] = []
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            fields = [f for f in re.split(r"[,\t\s]+", line) if f]
+            if len(fields) >= 3:
+                pairs.append((fields[0], fields[1], fields[2]))
+            elif len(fields) == 2:
+                pairs.append((f"pair{len(pairs) + 1}", fields[0], fields[1]))
+            else:
+                logger.warning("Skipping malformed primer line: %r", line)
+    return pairs
+
+
 def parse_target_names(raw: str) -> List[str]:
     """Parse a free-text gene list, ignoring ``#`` comment lines and blanks.
 
@@ -1029,6 +1054,65 @@ def design_primers_for_sequence(
         product_range=product_range, placement=placement,
         num_candidates=1, rank_by=rank_by,
     )[0]
+
+
+def analyze_primer_pair(
+    name: str,
+    forward: str,
+    reverse: str,
+    params: Optional[PrimerParams] = None,
+    *,
+    placement: str = "user",
+) -> dict:
+    """Full diagnostics for a *user-supplied* primer pair (no template design).
+
+    Computes exactly the metrics the design pipeline reports — each primer's Tm
+    and GC%, hairpin / self-dimer / hetero-dimer Tm, the composite quality score
+    and the at-a-glance warnings — for primers the user already has in hand.
+    Combine with :func:`in_silico_pcr` to add a specificity verdict. This closes
+    the gap where the tool could only score primers it *designed*: a bench
+    scientist with an existing pair can now run the same accurate QC without
+    reverse-engineering a template.
+
+    ``product_size`` is left ``None`` (it is only known once an amplicon is
+    predicted; the ``check`` front-end fills it from the in-silico PCR result).
+    Never raises; an empty/too-short primer yields an explanatory ``status``.
+    """
+    params = params or PrimerParams()
+    thermo = params.thermo
+    result = _new_result(name, placement)
+    fwd = clean_sequence(forward)
+    rev = clean_sequence(reverse)
+    if not fwd or not rev:
+        result["status"] = "Empty/invalid primer sequence"
+        return result
+    if len(fwd) < 10 or len(rev) < 10:
+        result["status"] = "Primer too short (< 10 nt)"
+        return result
+    fwd_struct = analyze_oligo(fwd, thermo)
+    rev_struct = analyze_oligo(rev, thermo)
+    fwd_tm, rev_tm = calc_tm(fwd, thermo), calc_tm(rev, thermo)
+    result.update(
+        {
+            "forward": fwd,
+            "reverse": rev,
+            "fwd_tm": fwd_tm,
+            "fwd_gc": calc_gc(fwd),
+            "rev_tm": rev_tm,
+            "rev_gc": calc_gc(rev),
+            "tm_diff": (round(abs(fwd_tm - rev_tm), 2)
+                        if fwd_tm is not None and rev_tm is not None else None),
+            "fwd_hairpin_tm": fwd_struct["hairpin_tm"],
+            "rev_hairpin_tm": rev_struct["hairpin_tm"],
+            "fwd_homodimer_tm": fwd_struct["homodimer_tm"],
+            "rev_homodimer_tm": rev_struct["homodimer_tm"],
+            "heterodimer_tm": heterodimer_tm(fwd, rev, thermo),
+            "status": "OK",
+        }
+    )
+    result["quality_score"] = quality_score(result, params)
+    result["warnings"] = "; ".join(primer_warnings(result))
+    return result
 
 
 def build_gene_template(

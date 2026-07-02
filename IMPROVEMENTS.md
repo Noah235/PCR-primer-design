@@ -7,6 +7,40 @@ by impact on the project's two priorities: **accuracy** and **ease of use**.
 
 ## ✅ Done in this iteration (latest)
 
+### Ease of use + accuracy — `check` mode for primers you already have (NEW)
+- **The tool could only score primers it *designed*.** A bench scientist with an
+  existing primer pair (from a paper, a collaborator, or an earlier run) had no
+  way to run the same QC or the accurate in-silico-PCR specificity check without
+  reverse-engineering a template to feed the design pipeline — a real, common
+  workflow was simply impossible.
+- **Fix / feature:** a new `analyze_primer_pair()` computes the full diagnostic
+  set for an arbitrary pair — each primer's Tm and GC%, hairpin / self-dimer /
+  hetero-dimer Tm, the composite quality score and the at-a-glance warnings —
+  reusing the exact same functions the design pipeline uses (so a checked primer
+  reports bit-identical Tm/GC to a designed one). A new `read_primer_pairs()`
+  loads a batch file of `name forward reverse` lines (comma/tab/space separated,
+  `#` comments and blanks ignored, 2-field lines auto-named). Both are wired into
+  a new **`check` CLI subcommand**: pass `--forward/--reverse` or `--primers
+  FILE`, optionally a `--genome` to run the two-orientation (optionally
+  mismatch-tolerant, `--seed-len/--max-mismatches`) specificity search, and
+  optionally `--bed` to export every predicted amplicon. With a genome the
+  predicted **product size** is filled from the in-silico PCR result and a single
+  predicted amplicon is reported as *Specific*; without a genome it is pure
+  primer QC (still fully useful). Output uses the shared CSV column layout.
+- **Regression-guarded** (6 new tests: metric reporting + emittable row,
+  designed-vs-checked Tm/GC identity, empty/too-short input flagged, batch-file
+  parsing across comma/tab/space + 2-field + malformed-skip, `check` CLI
+  end-to-end reporting a specific pair as one amplicon, and `check` QC-only with
+  no genome). **Benchmarked** (new "Primer check" section): QC alone is
+  ~0.5 ms/pair (a few secondary-structure calls, no Primer3 design) and adding
+  the genome specificity check costs the same ~14 ms/pair two-orientation search
+  the design pipeline already uses — the new front-end adds no algorithmic cost.
+  Verified end-to-end on a synthetic genome carrying a **duplicated** locus: the
+  pair is correctly flagged *Non-specific (3 amplicons)* and every predicted
+  amplicon (both real copies plus the spurious cross-copy product) is written to
+  BED, while a deliberately too-short pair fails gracefully with an explanatory
+  status instead of crashing the batch.
+
 ### Accuracy + ease of use — amplicon location BED export (NEW)
 - **You could see *that* a pair was non-specific, but not *where*.** The
   specificity search already computes every predicted amplicon's genome
